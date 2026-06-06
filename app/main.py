@@ -8,9 +8,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from typing import List
 from pipeline import process_image
-from db.corrections import store_corrections
+from db.corrections import store_corrections, ensure_table
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="Arabic Architectural OCR API", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app):
+    await ensure_table()
+    yield
+
+
+app = FastAPI(title="Arabic Architectural OCR API", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
