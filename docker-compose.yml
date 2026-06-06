@@ -6,7 +6,8 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - DATABASE_URL=postgresql://ocr:ocr@db:5432/ocr_db
     depends_on:
