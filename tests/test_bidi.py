@@ -27,8 +27,8 @@ def test_detect_language_english():
 
 
 def test_detect_language_mixed():
-    # roughly equal split → "mixed"
-    assert detect_language("غرفة 3.5m") == "mixed"
+    # "ab" (2 Latin) + "غر" (2 Arabic) = 50% Arabic → "mixed"
+    assert detect_language("ab غر") == "mixed"
 
 
 def test_detect_language_numbers_only():

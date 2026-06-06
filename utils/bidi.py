@@ -20,7 +20,7 @@ def detect_language(text: str) -> str:
     if total == 0:
         return "english"
     arabic_ratio = arabic_chars / total
-    if arabic_ratio > 0.85:
+    if arabic_ratio > 0.7:
         return "arabic"
     if arabic_ratio < 0.3:
         return "english"
