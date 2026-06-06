@@ -1,6 +1,8 @@
 import io
+import itertools
 import tempfile
 import os
+from typing import Iterator, Optional
 from lxml import etree
 import numpy as np
 from docx import Document
@@ -26,8 +28,6 @@ _WORD_SHAPE = {
 
 _HIGHLIGHT_MAP = {"yellow": "yellow", "red": "red"}
 
-_id_counter = [0]
-
 
 def assemble_document(elements: list[Element], crop_images: dict[str, np.ndarray]) -> bytes:
     """Assemble a Word document with absolutely positioned elements.
@@ -36,7 +36,7 @@ def assemble_document(elements: list[Element], crop_images: dict[str, np.ndarray
     crop_images: mapping of element id -> numpy BGR image (for ComplexShapeElement)
     Returns: .docx file as bytes
     """
-    _id_counter[0] = 0
+    _counter = itertools.count(1)
     doc = Document()
     # Remove the default empty paragraph Word adds
     for p in list(doc.paragraphs):
@@ -54,14 +54,15 @@ def assemble_document(elements: list[Element], crop_images: dict[str, np.ndarray
                 el.content, left, top, w, h,
                 is_rtl=(el.language == "arabic"),
                 highlight=el.highlight,
+                _counter=_counter,
             )
         elif isinstance(el, SimpleShapeElement):
             prst = _WORD_SHAPE.get(el.shape, "rect")
-            xml_str = _shape_xml(prst, left, top, w, h)
+            xml_str = _shape_xml(prst, left, top, w, h, _counter=_counter)
         elif isinstance(el, ComplexShapeElement):
             crop = crop_images.get(el.id)
             if crop is not None:
-                xml_str = _image_xml(doc, ndarray_to_png_bytes(crop), left, top, w, h)
+                xml_str = _image_xml(doc, ndarray_to_png_bytes(crop), left, top, w, h, _counter=_counter)
 
         if xml_str is not None:
             drawing_el = etree.fromstring(xml_str)
@@ -80,13 +81,12 @@ def _emu_coords(bbox) -> tuple[int, int, int, int]:
     return left, top, width, height
 
 
-def _next_id() -> int:
-    _id_counter[0] += 1
-    return _id_counter[0]
+def _next_id(_counter: Iterator[int]) -> int:
+    return next(_counter)
 
 
-def _anchor_wrap(left: int, top: int, cx: int, cy: int, inner_xml: str) -> str:
-    eid = _next_id()
+def _anchor_wrap(left: int, top: int, cx: int, cy: int, inner_xml: str, _counter: Iterator[int]) -> str:
+    eid = _next_id(_counter)
     return (
         '<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
         '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
@@ -106,7 +106,7 @@ def _anchor_wrap(left: int, top: int, cx: int, cy: int, inner_xml: str) -> str:
 
 
 def _text_box_xml(text: str, left: int, top: int, cx: int, cy: int,
-                  is_rtl: bool, highlight) -> str:
+                  is_rtl: bool, highlight: Optional[str], _counter: Iterator[int]) -> str:
     ns_a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
     ns_wps = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"'
     ns_w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
@@ -139,11 +139,12 @@ def _text_box_xml(text: str, left: int, top: int, cx: int, cy: int,
         '<wps:bodyPr/>'
         '</wps:wsp>'
         '</a:graphicData>'
-        '</a:graphic>'
+        '</a:graphic>',
+        _counter,
     )
 
 
-def _shape_xml(prst: str, left: int, top: int, cx: int, cy: int) -> str:
+def _shape_xml(prst: str, left: int, top: int, cx: int, cy: int, _counter: Iterator[int]) -> str:
     ns_a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
     ns_wps = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"'
     return _anchor_wrap(left, top, cx, cy,
@@ -158,11 +159,12 @@ def _shape_xml(prst: str, left: int, top: int, cx: int, cy: int) -> str:
         '<wps:bodyPr/>'
         '</wps:wsp>'
         '</a:graphicData>'
-        '</a:graphic>'
+        '</a:graphic>',
+        _counter,
     )
 
 
-def _image_xml(doc: Document, img_bytes: bytes, left: int, top: int, cx: int, cy: int) -> str:
+def _image_xml(doc: Document, img_bytes: bytes, left: int, top: int, cx: int, cy: int, _counter: Iterator[int]) -> str:
     """Add image to document part and return the drawing XML referencing it.
 
     Strategy:
@@ -206,7 +208,7 @@ def _image_xml(doc: Document, img_bytes: bytes, left: int, top: int, cx: int, cy
     ns_a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
     ns_pic = 'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"'
     ns_r = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
-    eid = _next_id()
+    eid = _next_id(_counter)
     return _anchor_wrap(left, top, cx, cy,
         f'<a:graphic {ns_a}>'
         '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
@@ -220,5 +222,6 @@ def _image_xml(doc: Document, img_bytes: bytes, left: int, top: int, cx: int, cy
         '</pic:spPr>'
         '</pic:pic>'
         '</a:graphicData>'
-        '</a:graphic>'
+        '</a:graphic>',
+        _counter,
     )
