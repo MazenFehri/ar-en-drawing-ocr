@@ -34,6 +34,15 @@ def test_detect_rectangle():
     assert shapes[0].shape_type in ("rect", "square")
 
 
+def test_detect_ellipse():
+    img = make_canvas(300, 400)
+    # Draw a wide ellipse (axes 120x60)
+    cv2.ellipse(img, (200, 150), (120, 60), 0, 0, 360, (0, 0, 0), -1)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    assert len(shapes) == 1
+    assert shapes[0].shape_type in ("ellipse", "circle")  # both are acceptable for oval shapes
+
+
 def test_shape_result_has_bbox():
     img = make_canvas()
     cv2.circle(img, (150, 150), 60, (0, 0, 0), -1)

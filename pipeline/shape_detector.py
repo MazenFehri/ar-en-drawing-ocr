@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 import cv2
 import numpy as np
@@ -57,24 +57,31 @@ def _classify(contour) -> tuple[str, float]:
         return "triangle", 0.95
 
     if vertices == 4:
-        x, y, w, h = cv2.boundingRect(approx)
+        x, y, w, h = cv2.boundingRect(contour)
+        bbox_area = w * h
+        # Extent: ratio of contour area to its bounding box area.
+        # Rectangles fill ~100% of their bbox; ellipses fill ~π/4 ≈ 78%.
+        extent = cv2.contourArea(contour) / bbox_area if bbox_area > 0 else 1.0
+        if extent < 0.85:
+            # Low extent means the shape is curved (ellipse/circle), not a flat rect
+            circ = _circularity(contour)
+            if circ > 0.85:
+                return "circle", float(circ)
+            return "ellipse", float(circ)
         ar = w / h if h > 0 else 1.0
         if 0.9 <= ar <= 1.1:
             return "square", 0.93
         return "rect", 0.93
 
-    # Only classify as circle/ellipse when the approximated polygon has many vertices
-    # (indicating a smooth curve). Low vertex counts (5–8) with moderate circularity
-    # are irregular polygons that should be treated as complex shapes.
+    # For 5+ vertices: use circularity + solidity
     circ = _circularity(contour)
-    if vertices >= 8:
-        if circ > 0.85:
-            return "circle", float(circ)
-        if circ > 0.7:
-            return "ellipse", float(circ)
-    else:
-        if circ > 0.85:
-            return "circle", float(circ)
+    solidity = _solidity(contour)
+
+    if circ > 0.85:
+        return "circle", float(circ)
+    if circ > 0.80 and solidity > 0.92:
+        # High circularity + high solidity → smooth convex curve = ellipse
+        return "ellipse", float(circ)
     return "complex", 0.70
 
 
@@ -84,3 +91,11 @@ def _circularity(contour) -> float:
     if peri == 0:
         return 0.0
     return (4 * math.pi * area) / (peri ** 2)
+
+
+def _solidity(contour) -> float:
+    hull = cv2.convexHull(contour)
+    hull_area = cv2.contourArea(hull)
+    if hull_area == 0:
+        return 0.0
+    return cv2.contourArea(contour) / hull_area
