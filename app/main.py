@@ -5,7 +5,10 @@ import numpy as np
 import cv2
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, field_validator
+from typing import List
 from pipeline import process_image
+from db.corrections import store_corrections
 
 app = FastAPI(title="Arabic Architectural OCR API", version="1.0.0")
 
@@ -41,3 +44,28 @@ async def process(image: UploadFile = File(...)):
         "docx_base64": docx_b64,
         "sidecar": {**result.sidecar, "document_id": document_id},
     })
+
+
+class CorrectionItem(BaseModel):
+    element_id: str
+    user_final: str
+
+
+class FeedbackRequest(BaseModel):
+    document_id: str
+    corrections: List[CorrectionItem]
+
+    @field_validator("corrections")
+    @classmethod
+    def corrections_not_empty(cls, v):
+        if not v:
+            raise ValueError("corrections must not be empty")
+        return v
+
+
+@app.post("/feedback", status_code=204)
+async def feedback(body: FeedbackRequest):
+    await store_corrections(
+        body.document_id,
+        [c.model_dump() for c in body.corrections],
+    )
