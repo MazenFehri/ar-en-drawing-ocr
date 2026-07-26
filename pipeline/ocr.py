@@ -41,6 +41,7 @@ def run_ocr(image: np.ndarray, confidence_threshold: float = 0.75) -> list[OcrWo
 def _get_ocr():
     global _ocr_instance
     if _ocr_instance is None:
+        from pipeline import _paddle_patch  # noqa: F401  (patches paddle before predictor build)
         from paddleocr import PaddleOCR
         _ocr_instance = PaddleOCR(lang="arabic", use_angle_cls=True, show_log=False)
     return _ocr_instance

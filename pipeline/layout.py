@@ -28,8 +28,9 @@ def segment_layout(image: np.ndarray) -> list[LayoutRegion]:
 def _get_structure():
     global _structure_instance
     if _structure_instance is None:
+        from pipeline import _paddle_patch  # noqa: F401  (patches paddle before predictor build)
         from paddleocr import PPStructure
-        pp = PPStructure(show_log=False, lang="arabic")
+        pp = PPStructure(show_log=False)
         _structure_instance = lambda img: [
             {"type": r["type"], "bbox": r["bbox"]} for r in pp(img)
         ]

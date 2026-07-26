@@ -4,9 +4,11 @@
 
 **Goal:** Build a FastAPI microservice that accepts Arabic/English architectural drawing images and returns a Word document with text, shapes, and symbols at approximately correct positions, plus a JSON sidecar with confidence scores and LLM corrections.
 
-**Architecture:** 8-stage pipeline — preprocess → layout segmentation → shape detection → OCR → LLM correction → layout reconstruction → Word assembly → JSON sidecar. PaddleOCR handles text (free, local), OpenCV handles shapes, Claude Haiku Vision corrects low-confidence words, python-docx generates the Word file.
+**Architecture:** 8-stage pipeline — preprocess → layout segmentation → shape detection → OCR → LLM correction → layout reconstruction → Word assembly → JSON sidecar. PaddleOCR handles text (free, local), OpenCV handles shapes, OpenRouter free vision model (Qwen2-VL) corrects low-confidence words, python-docx generates the Word file.
 
-**Tech Stack:** Python 3.11, FastAPI, PaddleOCR 2.7+, OpenCV 4.9+, python-docx 1.1+, anthropic SDK 0.25+, python-bidi, arabic-reshaper, PostgreSQL 15, Docker
+**Tech Stack:** Python 3.11, FastAPI, PaddleOCR 2.7+, OpenCV 4.9+, python-docx 1.1+, openai 1.30+ (OpenRouter-compatible), python-bidi, arabic-reshaper, PostgreSQL 15, Docker
+
+**LLM:** `qwen/qwen2-vl-7b-instruct:free` via OpenRouter (free tier, vision + strong Arabic/English). Fallback: `meta-llama/llama-3.2-11b-vision-instruct:free`. OpenRouter uses OpenAI-compatible API at `https://openrouter.ai/api/v1`.
 
 ---
 
@@ -73,7 +75,7 @@ paddleocr==2.7.3
 opencv-python==4.9.0.80
 Pillow==10.3.0
 python-docx==1.1.2
-anthropic==0.28.0
+openai==1.35.0
 python-bidi==0.4.2
 arabic-reshaper==3.0.0
 langdetect==1.0.9
@@ -90,7 +92,8 @@ httpx==0.27.0
 - [ ] **Step 2: Create .env.example**
 
 ```
-ANTHROPIC_API_KEY=your-key-here
+OPENROUTER_API_KEY=your-openrouter-key-here
+OPENROUTER_MODEL=qwen/qwen2-vl-7b-instruct:free
 CONFIDENCE_THRESHOLD=0.75
 LABEL_SHAPES=true
 DATABASE_URL=postgresql://ocr:ocr@localhost:5432/ocr_db
@@ -103,7 +106,8 @@ LOG_LEVEL=INFO
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    anthropic_api_key: str
+    openrouter_api_key: str
+    openrouter_model: str = "qwen/qwen2-vl-7b-instruct:free"
     confidence_threshold: float = 0.75
     label_shapes: bool = True
     database_url: str = "postgresql://ocr:ocr@localhost:5432/ocr_db"
@@ -1279,21 +1283,23 @@ def _call_llm(client, image_bytes: bytes, flagged: list[TextElement]) -> list[di
         "For each flagged word, return the corrected spelling and your certainty (0.0–1.0).\n"
         'Format: [{"original": "...", "corrected": "...", "certainty": 0.0}]'
     )
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+    response = client.chat.completions.create(
+        model=settings.openrouter_model,
         max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {
-                    "type": "base64", "media_type": "image/jpeg", "data": img_b64
-                }},
-                {"type": "text", "text": prompt},
-            ],
-        }],
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:image/jpeg;base64,{img_b64}"
+                    }},
+                    {"type": "text", "text": prompt},
+                ],
+            },
+        ],
     )
-    return json.loads(message.content[0].text)
+    return json.loads(response.choices[0].message.content)
 
 
 def _build_prompt(flagged: list[TextElement]) -> str:
@@ -1306,9 +1312,12 @@ def _build_prompt(flagged: list[TextElement]) -> str:
 def _get_client():
     global _client_instance
     if _client_instance is None:
-        import anthropic
+        from openai import OpenAI
         from app.config import settings
-        _client_instance = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        _client_instance = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=settings.openrouter_api_key,
+        )
     return _client_instance
 ```
 

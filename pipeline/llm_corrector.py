@@ -1,6 +1,9 @@
 import base64
 import json
+import logging
 from models.elements import TextElement, LLMCorrection, Element
+
+logger = logging.getLogger(__name__)
 
 _client_instance = None
 
@@ -25,9 +28,21 @@ def apply_corrections(
     if not flagged:
         return elements
 
-    client = _get_client()
-    corrections = _call_llm(client, image_bytes, flagged)
-    correction_map = {c["original"]: c for c in corrections}
+    # LLM correction is an optional enhancement. If the provider is unavailable
+    # (rate limit, network error, invalid model, malformed response), skip it and
+    # return the elements with their original OCR text rather than failing the
+    # whole request.
+    try:
+        client = _get_client()
+        corrections = _call_llm(client, image_bytes, flagged)
+        correction_map = {
+            c["original"]: c
+            for c in corrections
+            if isinstance(c, dict) and "original" in c and "corrected" in c
+        }
+    except Exception as exc:
+        logger.warning("LLM correction skipped (%s): %s", type(exc).__name__, exc)
+        return elements
 
     updated = []
     for el in elements:
@@ -36,7 +51,7 @@ def apply_corrections(
             continue
         corr_data = correction_map.get(el.content)
         if corr_data:
-            certainty = corr_data["certainty"]
+            certainty = corr_data.get("certainty", 0.0)
             updated.append(el.model_copy(update={
                 "content": corr_data["corrected"],
                 "llm_correction": LLMCorrection(
@@ -71,7 +86,22 @@ def _call_llm(client, image_bytes: bytes, flagged: list[TextElement]) -> list[di
             },
         ],
     )
-    return json.loads(response.choices[0].message.content)
+    return _parse_json_array(response.choices[0].message.content)
+
+
+def _parse_json_array(content: str) -> list[dict]:
+    """Parse a JSON array from the model response, tolerating markdown fences."""
+    text = (content or "").strip()
+    if text.startswith("```"):
+        # strip ```json ... ``` or ``` ... ``` fences
+        text = text.split("```", 2)[1] if text.count("```") >= 2 else text.strip("`")
+        if text.lstrip().lower().startswith("json"):
+            text = text.lstrip()[4:]
+        text = text.strip("`").strip()
+    start, end = text.find("["), text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        text = text[start:end + 1]
+    return json.loads(text)
 
 
 def _build_prompt(flagged: list[TextElement]) -> str:

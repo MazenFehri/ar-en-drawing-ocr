@@ -10,6 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Disable MKL-DNN to avoid AVX-512 kernels on CPUs without AVX-512 (Alder/Raptor Lake).
+# IR optimization is disabled in code via pipeline/_paddle_patch.py.
+ENV FLAGS_use_mkldnn=0
+
 WORKDIR /app
 
 COPY requirements.txt .

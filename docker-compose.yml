@@ -10,6 +10,10 @@ services:
         required: false
     environment:
       - DATABASE_URL=postgresql://ocr:ocr@db:5432/ocr_db
+    volumes:
+      # Persist downloaded PaddleOCR / PPStructure models across rebuilds so the
+      # slow first-request model download only happens once.
+      - paddle_models:/root/.paddleocr
     depends_on:
       db:
         condition: service_healthy
@@ -24,7 +28,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ocr"]
+      test: ["CMD-SHELL", "pg_isready -U ocr -d ocr_db"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -32,3 +36,4 @@ services:
 
 volumes:
   pgdata:
+  paddle_models:
