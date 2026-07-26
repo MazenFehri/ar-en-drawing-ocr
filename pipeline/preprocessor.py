@@ -1,13 +1,32 @@
 import cv2
 import numpy as np
 
+# Above this, denoising and OCR get slow and the base64 image sent to the LLM
+# gets large, with no accuracy gain — architectural text is legible well below it.
+MAX_DIM_PX = 2000
+
+# Page-level skew beyond this is almost certainly a misdetection (a diagonal
+# section line or a sparse page dominating the min-area rect), not a tilted scan.
+MAX_SKEW_DEG = 15.0
+
 
 def preprocess(image: np.ndarray) -> np.ndarray:
     """Run all preprocessing stages on a BGR image."""
-    img = _deskew(image)
+    img = downscale(image)
+    img = _deskew(img)
     img = _denoise(img)
     img = _enhance_contrast(img)
     return img
+
+
+def downscale(image: np.ndarray, max_dim: int = MAX_DIM_PX) -> np.ndarray:
+    """Shrink an image so its longest side is at most max_dim. Smaller images pass through."""
+    h, w = image.shape[:2]
+    longest = max(h, w)
+    if longest <= max_dim:
+        return image
+    scale = max_dim / longest
+    return cv2.resize(image, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
 
 
 def detect_quality(image: np.ndarray) -> float:
@@ -30,6 +49,11 @@ def _deskew(image: np.ndarray) -> np.ndarray:
     else:
         angle = -angle
     if abs(angle) < 0.5:
+        return image
+    if abs(angle) > MAX_SKEW_DEG:
+        # Detection failed — rotating here would wreck the page. A drawing whose
+        # ink is dominated by a diagonal (roof slope, section cut) or a nearly
+        # blank page both yield ~45 deg here.
         return image
     h, w = image.shape[:2]
     M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)

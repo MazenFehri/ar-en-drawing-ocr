@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 import cv2
 
-from pipeline.preprocessor import preprocess
+from pipeline.preprocessor import preprocess, detect_quality
 from pipeline.layout import segment_layout
 from pipeline.shape_detector import detect_shapes
 from pipeline.ocr import run_ocr
@@ -27,20 +27,28 @@ def process_image(
     threshold = confidence_threshold if confidence_threshold is not None else settings.confidence_threshold
     start = time.time()
 
-    img_h, img_w = image.shape[:2]
+    # Sidecar reports the caller's original page size; element bboxes are relative
+    # so they stay valid against it even though preprocessing may have downscaled.
+    orig_h, orig_w = image.shape[:2]
 
-    # Stage 1: Preprocess
+    # Stage 1: Preprocess (may downscale — normalize coords against the result)
     preprocessed = preprocess(image)
+    img_h, img_w = preprocessed.shape[:2]
 
     # Stage 2: Layout segmentation
     regions = segment_layout(preprocessed)
     text_region_bboxes = [r.bbox_px for r in regions if r.region_type == "text"]
 
-    # Stage 3: Shape detection (masking text regions)
-    shapes = detect_shapes(preprocessed, text_bboxes_px=text_region_bboxes)
-
-    # Stage 4: OCR
+    # Stage 3: OCR — runs before shape detection so its word boxes can mask text.
     words = run_ocr(preprocessed, confidence_threshold=threshold)
+
+    # Stage 4: Shape detection. Mask both the layout text regions and the actual
+    # OCR word boxes; without the word boxes every glyph cluster the layout model
+    # missed comes back as a "complex" shape and gets duplicated into the document.
+    shapes = detect_shapes(
+        preprocessed,
+        text_bboxes_px=text_region_bboxes + [w.bbox_px for w in words],
+    )
 
     # Stage 5: Layout reconstruction (pixel -> relative coords, reading order)
     elements = reconstruct_layout(words, shapes, img_w, img_h)
@@ -60,6 +68,9 @@ def process_image(
 
     # Stage 8: JSON sidecar
     elapsed_ms = int((time.time() - start) * 1000)
-    sidecar = build_sidecar(elements, img_w, img_h, elapsed_ms)
+    sidecar = build_sidecar(
+        elements, orig_w, orig_h, elapsed_ms,
+        quality_score=detect_quality(preprocessed),
+    )
 
     return PipelineResult(docx_bytes=docx_bytes, sidecar=sidecar)

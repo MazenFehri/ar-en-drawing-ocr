@@ -6,6 +6,7 @@ def build_sidecar(
     image_width: int,
     image_height: int,
     processing_time_ms: int,
+    quality_score: float | None = None,
 ) -> dict:
     serialized = [_serialize(e) for e in elements]
     text_count = sum(1 for e in elements if isinstance(e, TextElement))
@@ -25,6 +26,9 @@ def build_sidecar(
             "complex_shapes": complex_count,
             "llm_corrections": correction_count,
             "processing_time_ms": processing_time_ms,
+            # Laplacian sharpness in [0,1]. Low values mean the scan was blurry and
+            # the confidences below should be read with that in mind.
+            "quality_score": quality_score,
         },
     }
 

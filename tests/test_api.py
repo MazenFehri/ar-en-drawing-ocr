@@ -83,3 +83,13 @@ def test_process_rejects_text_file():
         files={"image": ("file.txt", io.BytesIO(b"hello world"), "text/plain")}
     )
     assert resp.status_code == 400
+
+
+def test_process_rejects_oversized_upload():
+    from app.main import _MAX_UPLOAD_BYTES
+    huge = b"\xff" * (_MAX_UPLOAD_BYTES + 1)
+    resp = client.post(
+        "/process",
+        files={"image": ("huge.jpg", io.BytesIO(huge), "image/jpeg")}
+    )
+    assert resp.status_code == 413

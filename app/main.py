@@ -23,12 +23,14 @@ app = FastAPI(title="Arabic Architectural OCR API", version="1.0.0", lifespan=li
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "models_loaded": False}
+    import pipeline.ocr as _ocr
+    return {"status": "ok", "models_loaded": _ocr._ocr_instance is not None}
 
 
 _ALLOWED_CONTENT_TYPES = {
     "image/jpeg", "image/png", "image/tiff", "image/bmp", "image/webp"
 }
+_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 @app.post("/process")
@@ -37,6 +39,11 @@ async def process(image: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {image.content_type}")
 
     raw = await image.read()
+    if len(raw) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image exceeds {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit",
+        )
     arr = np.frombuffer(raw, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:

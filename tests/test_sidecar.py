@@ -2,6 +2,11 @@ from models.elements import BBox, TextElement, SimpleShapeElement, ComplexShapeE
 from pipeline.sidecar import build_sidecar
 
 
+def test_sidecar_carries_quality_score():
+    side = build_sidecar([], 100, 200, 5, quality_score=0.42)
+    assert side["stats"]["quality_score"] == 0.42
+
+
 def make_text(id_, text, conf, corrected=None, highlight=None):
     correction = LLMCorrection(original=text, corrected=corrected, certainty=0.95) if corrected else None
     return TextElement(
