@@ -107,8 +107,21 @@ is an alias for `Invoke-WebRequest` and does not accept `-X`/`-F` flags.
 
 ```bash
 curl -X POST http://localhost:8000/process \
-  -F "image=@your_drawing.jpg"
+  -F "image=@your_drawing.jpg" \
+  -F "confidence_threshold=0.75" \
+  -F "language_hint=ar+en" \
+  -F "label_shapes=true"
 ```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `image` | required | The drawing. jpeg/png/tiff/bmp/webp, max 25 MB. |
+| `confidence_threshold` | `0.75` | Words below this go to the LLM for correction. Must be 0.0–1.0. |
+| `language_hint` | `ar+en` | One of `ar+en`, `ar`, `en`. Picks the OCR model; `ar+en` also reads Latin and digits. |
+| `label_shapes` | from env | Ask the vision model to name complex shape crops (`llm_label` in the sidecar). |
+
+Raising `confidence_threshold` sends more words to the LLM: slower, and on a free
+model it will hit rate limits. `0.75` is the useful default.
 
 Response:
 ```json
@@ -165,7 +178,11 @@ image → preprocess → layout segmentation → shape detection
 - **Layout:** PaddleOCR PP-Structure region segmentation
 - **LLM correction:** OpenRouter free vision model (configurable, optional)
 - **Word output:** Absolutely positioned DrawingML objects (text boxes, shapes, embedded images)
-- **Arabic text:** `arabic_reshaper` + `python-bidi` + `<w:bidi/>` RTL tags
+- **Arabic text:** PaddleOCR reports Arabic in *visual* order (the order glyphs sit on
+  the page). `utils.bidi.to_logical_order` converts it back to logical order before it
+  reaches the sidecar or Word — without that, `<w:bidi/>` reverses it a second time and
+  it renders backwards. Reading order groups words into lines and sorts each line in
+  its own direction, right-to-left for Arabic.
 - **Storage:** PostgreSQL via asyncpg for correction feedback
 
 ## Troubleshooting

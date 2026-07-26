@@ -6,11 +6,12 @@ import cv2
 from pipeline.preprocessor import preprocess, detect_quality
 from pipeline.layout import segment_layout
 from pipeline.shape_detector import detect_shapes
-from pipeline.ocr import run_ocr
-from pipeline.llm_corrector import apply_corrections
+from pipeline.ocr import run_ocr, DEFAULT_LANGUAGE_HINT
+from pipeline.llm_corrector import apply_corrections, label_complex_shapes
 from pipeline.layout_reconstructor import reconstruct_layout
 from pipeline.word_assembler import assemble_document
 from pipeline.sidecar import build_sidecar
+from utils.image_utils import ndarray_to_png_bytes
 from app.config import settings
 
 
@@ -23,8 +24,11 @@ class PipelineResult:
 def process_image(
     image: np.ndarray,
     confidence_threshold: float = None,
+    language_hint: str = DEFAULT_LANGUAGE_HINT,
+    label_shapes: bool = None,
 ) -> PipelineResult:
     threshold = confidence_threshold if confidence_threshold is not None else settings.confidence_threshold
+    want_labels = label_shapes if label_shapes is not None else settings.label_shapes
     start = time.time()
 
     # Sidecar reports the caller's original page size; element bboxes are relative
@@ -40,7 +44,7 @@ def process_image(
     text_region_bboxes = [r.bbox_px for r in regions if r.region_type == "text"]
 
     # Stage 3: OCR — runs before shape detection so its word boxes can mask text.
-    words = run_ocr(preprocessed, confidence_threshold=threshold)
+    words = run_ocr(preprocessed, confidence_threshold=threshold, language_hint=language_hint)
 
     # Stage 4: Shape detection. Mask both the layout text regions and the actual
     # OCR word boxes; without the word boxes every glyph cluster the layout model
@@ -62,6 +66,13 @@ def process_image(
     for j, shape in enumerate(shapes):
         if shape.shape_type == "complex" and shape.crop is not None:
             crop_images[f"shape_{j:03d}"] = shape.crop
+
+    # Stage 6b: name the complex shapes, so the sidecar says "door swing" not "unknown"
+    if want_labels and crop_images:
+        elements = label_complex_shapes(
+            elements,
+            {eid: ndarray_to_png_bytes(crop) for eid, crop in crop_images.items()},
+        )
 
     # Stage 7: Word assembly
     docx_bytes = assemble_document(elements, crop_images=crop_images)

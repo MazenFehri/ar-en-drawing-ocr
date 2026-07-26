@@ -1,9 +1,16 @@
 import base64
 import json
 import logging
-from models.elements import TextElement, LLMCorrection, Element
+from models.elements import TextElement, ComplexShapeElement, LLMCorrection, Element
 
 logger = logging.getLogger(__name__)
+
+SHAPE_PROMPT = """You are labelling symbols cropped from an architectural drawing.
+Typical symbols: door swing, window, staircase, north arrow, section marker, grid
+reference, toilet, sink, bath, bed, sofa, dining table, car, tree, elevation marker.
+Each image below is one cropped symbol, given in order.
+Return ONLY a JSON array, one entry per image, no explanation:
+[{"index": 0, "label": "door swing", "certainty": 0.0}]"""
 
 _client_instance = None
 
@@ -50,7 +57,9 @@ def apply_corrections(
             updated.append(el)
             continue
         corr_data = correction_map.get(el.content)
-        if corr_data:
+        # A word the model hands back unchanged was confirmed, not corrected —
+        # highlighting it would paint most of the page yellow at a high threshold.
+        if corr_data and corr_data["corrected"] != el.content:
             certainty = corr_data.get("certainty", 0.0)
             updated.append(el.model_copy(update={
                 "content": corr_data["corrected"],
@@ -64,6 +73,70 @@ def apply_corrections(
         else:
             updated.append(el)
     return updated
+
+
+def label_complex_shapes(
+    elements: list[Element],
+    crop_png_bytes: dict[str, bytes],
+) -> list[Element]:
+    """Ask the vision model what each complex shape crop depicts.
+
+    Fills llm_label / llm_label_certainty on ComplexShapeElements. Like word
+    correction this is best-effort: a provider failure leaves the labels unset
+    rather than failing the request.
+    """
+    targets = [
+        e for e in elements
+        if isinstance(e, ComplexShapeElement) and e.id in crop_png_bytes
+    ]
+    if not targets:
+        return elements
+
+    try:
+        client = _get_client()
+        raw = _call_shape_llm(client, targets, crop_png_bytes)
+        by_index = {
+            int(item["index"]): item
+            for item in raw
+            if isinstance(item, dict) and "index" in item and "label" in item
+        }
+    except Exception as exc:
+        logger.warning("Shape labelling skipped (%s): %s", type(exc).__name__, exc)
+        return elements
+
+    labels = {
+        el.id: by_index[i] for i, el in enumerate(targets) if i in by_index
+    }
+    return [
+        el.model_copy(update={
+            "llm_label": labels[el.id]["label"],
+            "llm_label_certainty": float(labels[el.id].get("certainty", 0.0)),
+        })
+        if isinstance(el, ComplexShapeElement) and el.id in labels
+        else el
+        for el in elements
+    ]
+
+
+def _call_shape_llm(client, targets, crop_png_bytes: dict[str, bytes]) -> list[dict]:
+    content = []
+    for el in targets:
+        b64 = base64.standard_b64encode(crop_png_bytes[el.id]).decode("utf-8")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{b64}"},
+        })
+    content.append({"type": "text", "text": f"{len(targets)} symbol images, in order."})
+
+    response = client.chat.completions.create(
+        model=_get_model(),
+        max_tokens=1024,
+        messages=[
+            {"role": "system", "content": SHAPE_PROMPT},
+            {"role": "user", "content": content},
+        ],
+    )
+    return _parse_json_array(response.choices[0].message.content)
 
 
 def _call_llm(client, image_bytes: bytes, flagged: list[TextElement]) -> list[dict]:

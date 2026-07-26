@@ -1,4 +1,28 @@
-from utils.bidi import is_arabic, detect_language, reshape_for_display
+from utils.bidi import is_arabic, detect_language, reshape_for_display, to_logical_order
+
+
+def test_to_logical_order_reverses_visual_arabic():
+    # PaddleOCR reports these visually; the right-hand side is the logical form.
+    assert to_logical_order("يضرألا") == "الأرضي"
+    assert to_logical_order("ةفرغ") == "غرفة"
+    assert to_logical_order("خبطملا") == "المطبخ"
+
+
+def test_to_logical_order_leaves_english_alone():
+    assert to_logical_order("ENTRANCE") == "ENTRANCE"
+    assert to_logical_order("3.5m x 4.2m") == "3.5m x 4.2m"
+
+
+def test_to_logical_order_keeps_embedded_latin_forwards():
+    # "غرفة 3.5m" renders with the Arabic on the right and "3.5m" to its left, still
+    # left-to-right — so OCR reads off the page "3.5m" then the Arabic glyphs. The
+    # whole-string reverse would leave the Latin as "m5.3"; it must be flipped back.
+    assert to_logical_order("3.5m ةفرغ") == "غرفة 3.5m"
+
+
+def test_to_logical_order_is_involutive_on_arabic():
+    for word in ("غرفة", "المطبخ", "الصالة", "مدخل"):
+        assert to_logical_order(to_logical_order(word)) == word
 
 
 def test_is_arabic_with_arabic_text():

@@ -20,6 +20,37 @@ def test_to_relative_bbox():
     assert bbox.h == pytest.approx(50 / 1500)
 
 
+def test_arabic_line_reads_right_to_left():
+    """On one line, "غرفة النوم" has غرفة rightmost — it must come out first.
+
+    Input is what PaddleOCR hands back: visual order. Output is logical order.
+    """
+    words = [
+        make_word("مونلا", 100, 50, 80, 24),   # النوم, left on the page
+        make_word("ةفرغ", 200, 52, 70, 24),    # غرفة,  right on the page
+    ]
+    ordered = reconstruct_layout(words, [], IMG_W, IMG_H)
+    assert [el.content for el in ordered] == ["غرفة", "النوم"]
+
+
+def test_english_line_reads_left_to_right():
+    words = [
+        make_word("ROOM", 300, 50, 80, 24),
+        make_word("LIVING", 200, 52, 90, 24),
+    ]
+    ordered = reconstruct_layout(words, [], IMG_W, IMG_H)
+    assert [el.content for el in ordered] == ["LIVING", "ROOM"]
+
+
+def test_separate_lines_stay_top_to_bottom():
+    words = [
+        make_word("SECOND", 400, 300, 90, 24),
+        make_word("FIRST", 100, 50, 80, 24),
+    ]
+    ordered = reconstruct_layout(words, [], IMG_W, IMG_H)
+    assert [el.content for el in ordered] == ["FIRST", "SECOND"]
+
+
 def test_reading_order_top_to_bottom():
     words = [
         make_word("bottom", 10, 200),

@@ -4,6 +4,28 @@ from models.elements import TextElement, BBox, LLMCorrection
 from pipeline.llm_corrector import apply_corrections, _build_prompt
 
 
+def test_unchanged_word_is_not_highlighted():
+    """The model echoing a word back unchanged is a confirmation, not a correction."""
+    from unittest.mock import patch as _patch, MagicMock as _MagicMock
+    from pipeline.llm_corrector import apply_corrections as _apply
+    from models.elements import TextElement as _TE, BBox as _BBox
+
+    el = _TE(id="t0", bbox=_BBox(x=0.0, y=0.0, w=0.1, h=0.02),
+             content="GROUND", language="english", confidence=0.92)
+    resp = _MagicMock()
+    resp.choices = [_MagicMock(message=_MagicMock(
+        content='[{"original": "GROUND", "corrected": "GROUND", "certainty": 1.0}]'))]
+    client = _MagicMock()
+    client.chat.completions.create.return_value = resp
+
+    with _patch("pipeline.llm_corrector._get_client", return_value=client):
+        out = _apply([el], b"img", confidence_threshold=0.99)
+
+    assert out[0].highlight is None
+    assert out[0].llm_correction is None
+    assert out[0].content == "GROUND"
+
+
 def make_text_el(id_, text, conf):
     return TextElement(
         id=id_,
