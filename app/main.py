@@ -1,10 +1,11 @@
 import base64
 import io
+import json
 import uuid
 import numpy as np
 import cv2
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, field_validator
 from typing import List
 from pipeline import process_image
@@ -42,6 +43,7 @@ async def process(
     confidence_threshold: float = Form(None),
     language_hint: str = Form("ar+en"),
     label_shapes: bool = Form(None),
+    response_format: str = Form("json"),
 ):
     if image.content_type not in _ALLOWED_CONTENT_TYPES:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {image.content_type}")
@@ -52,6 +54,8 @@ async def process(
             status_code=400,
             detail=f"language_hint must be one of {sorted(_LANGUAGE_HINTS)}",
         )
+    if response_format not in ("json", "docx"):
+        raise HTTPException(status_code=400, detail="response_format must be 'json' or 'docx'")
 
     raw = await image.read()
     if len(raw) > _MAX_UPLOAD_BYTES:
@@ -72,6 +76,21 @@ async def process(
     )
 
     document_id = str(uuid.uuid4())
+
+    if response_format == "docx":
+        # The .docx itself, so a browser (or Swagger's "Download file" link) saves a
+        # file you can open instead of a base64 blob you have to decode by hand.
+        # The sidecar rides along in headers.
+        return Response(
+            content=result.docx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": f'attachment; filename="{document_id}.docx"',
+                "X-Document-Id": document_id,
+                "X-Sidecar-Stats": json.dumps(result.sidecar["stats"]),
+            },
+        )
+
     docx_b64 = base64.standard_b64encode(result.docx_bytes).decode("utf-8")
 
     return JSONResponse({

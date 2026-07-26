@@ -1,0 +1,407 @@
+{
+  "page_dimensions": {
+    "width_px": 1200,
+    "height_px": 1600
+  },
+  "elements": [
+    {
+      "id": "text_000",
+      "type": "text",
+      "bbox": {
+        "x": 0.0775,
+        "y": 0.035,
+        "w": 0.08666666666666667,
+        "h": 0.03
+      },
+      "content": "الأرضي",
+      "language": "arabic",
+      "confidence": 0.9984522461891174,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_001",
+      "type": "text",
+      "bbox": {
+        "x": 0.16416666666666666,
+        "y": 0.035,
+        "w": 0.065,
+        "h": 0.028125
+      },
+      "content": "الطابق",
+      "language": "arabic",
+      "confidence": 0.9251070022583008,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_002",
+      "type": "text",
+      "bbox": {
+        "x": 0.22833333333333333,
+        "y": 0.03625,
+        "w": 0.0675,
+        "h": 0.02125
+      },
+      "content": "مخطط",
+      "language": "arabic",
+      "confidence": 0.9998820424079895,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_003",
+      "type": "text",
+      "bbox": {
+        "x": 0.5866666666666667,
+        "y": 0.040625,
+        "w": 0.12083333333333333,
+        "h": 0.0175
+      },
+      "content": "GROUND",
+      "language": "english",
+      "confidence": 0.9218676090240479,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_004",
+      "type": "text",
+      "bbox": {
+        "x": 0.7183333333333334,
+        "y": 0.03875,
+        "w": 0.09833333333333333,
+        "h": 0.0175
+      },
+      "content": "FLOOR",
+      "language": "english",
+      "confidence": 0.971653938293457,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_005",
+      "type": "text",
+      "bbox": {
+        "x": 0.8208333333333333,
+        "y": 0.039375,
+        "w": 0.07583333333333334,
+        "h": 0.01875
+      },
+      "content": "PLAN",
+      "language": "english",
+      "confidence": 0.9983274936676025,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_006",
+      "type": "text",
+      "bbox": {
+        "x": 0.5766666666666667,
+        "y": 0.170625,
+        "w": 0.0725,
+        "h": 0.030625
+      },
+      "content": "المطبخ",
+      "language": "arabic",
+      "confidence": 0.9504558444023132,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_007",
+      "type": "text",
+      "bbox": {
+        "x": 0.1625,
+        "y": 0.174375,
+        "w": 0.0575,
+        "h": 0.024375
+      },
+      "content": "غرفة",
+      "language": "arabic",
+      "confidence": 0.9695491790771484,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_008",
+      "type": "text",
+      "bbox": {
+        "x": 0.11833333333333333,
+        "y": 0.17375,
+        "w": 0.05416666666666667,
+        "h": 0.02875
+      },
+      "content": "النوم",
+      "language": "arabic",
+      "confidence": 0.9722625017166138,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_009",
+      "type": "text",
+      "bbox": {
+        "x": 0.1275,
+        "y": 0.221875,
+        "w": 0.1425,
+        "h": 0.0175
+      },
+      "content": "BEDROOM",
+      "language": "english",
+      "confidence": 0.9485255479812622,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_010",
+      "type": "text",
+      "bbox": {
+        "x": 0.27416666666666667,
+        "y": 0.21875,
+        "w": 0.1625,
+        "h": 0.024375
+      },
+      "content": "3.5m x 4.2m",
+      "language": "english",
+      "confidence": 0.9104816913604736,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_011",
+      "type": "text",
+      "bbox": {
+        "x": 0.585,
+        "y": 0.220625,
+        "w": 0.1225,
+        "h": 0.01875
+      },
+      "content": "KITCHEN",
+      "language": "english",
+      "confidence": 0.9975183606147766,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_012",
+      "type": "text",
+      "bbox": {
+        "x": 0.3308333333333333,
+        "y": 0.45,
+        "w": 0.0625,
+        "h": 0.01875
+      },
+      "content": "الصالة",
+      "language": "arabic",
+      "confidence": 0.9945383071899414,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_013",
+      "type": "text",
+      "bbox": {
+        "x": 0.33416666666666667,
+        "y": 0.495625,
+        "w": 0.09166666666666666,
+        "h": 0.01875
+      },
+      "content": "LMVING",
+      "language": "english",
+      "confidence": 0.9333084225654602,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_014",
+      "type": "text",
+      "bbox": {
+        "x": 0.43333333333333335,
+        "y": 0.495625,
+        "w": 0.08666666666666667,
+        "h": 0.01875
+      },
+      "content": "ROOM",
+      "language": "english",
+      "confidence": 0.9978672862052917,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_015",
+      "type": "text",
+      "bbox": {
+        "x": 0.12333333333333334,
+        "y": 0.771875,
+        "w": 0.07,
+        "h": 0.01875
+      },
+      "content": "circle",
+      "language": "english",
+      "confidence": 0.964278519153595,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_016",
+      "type": "text",
+      "bbox": {
+        "x": 0.5125,
+        "y": 0.769375,
+        "w": 0.09833333333333333,
+        "h": 0.025625
+      },
+      "content": "triangle",
+      "language": "english",
+      "confidence": 0.937633752822876,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_017",
+      "type": "text",
+      "bbox": {
+        "x": 0.07833333333333334,
+        "y": 0.84625,
+        "w": 0.07333333333333333,
+        "h": 0.024375
+      },
+      "content": "رئيسي",
+      "language": "arabic",
+      "confidence": 0.9908774495124817,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_018",
+      "type": "text",
+      "bbox": {
+        "x": 0.14416666666666667,
+        "y": 0.843125,
+        "w": 0.055,
+        "h": 0.023125
+      },
+      "content": "مدخل",
+      "language": "arabic",
+      "confidence": 0.9944625496864319,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_019",
+      "type": "text",
+      "bbox": {
+        "x": 0.4975,
+        "y": 0.845,
+        "w": 0.075,
+        "h": 0.021875
+      },
+      "content": "MAIN",
+      "language": "english",
+      "confidence": 0.9993433952331543,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "text_020",
+      "type": "text",
+      "bbox": {
+        "x": 0.5791666666666667,
+        "y": 0.845,
+        "w": 0.15666666666666668,
+        "h": 0.020625
+      },
+      "content": "ENTRANCE",
+      "language": "english",
+      "confidence": 0.9224936962127686,
+      "highlight": null,
+      "llm_correction": null
+    },
+    {
+      "id": "shape_000",
+      "type": "simple_shape",
+      "bbox": {
+        "x": 0.5,
+        "y": 0.625,
+        "w": 0.1675,
+        "h": 0.113125
+      },
+      "shape": "triangle",
+      "confidence": 0.95
+    },
+    {
+      "id": "shape_001",
+      "type": "simple_shape",
+      "bbox": {
+        "x": 0.16666666666666666,
+        "y": 0.625,
+        "w": 0.15083333333333335,
+        "h": 0.113125
+      },
+      "shape": "circle",
+      "confidence": 0.9007598887588598
+    },
+    {
+      "id": "shape_002",
+      "type": "complex_shape",
+      "bbox": {
+        "x": 0.7166666666666667,
+        "y": 0.61875,
+        "w": 0.1925,
+        "h": 0.150625
+      },
+      "shape": "unknown",
+      "embedded_as": "image",
+      "llm_label": "grid reference",
+      "llm_label_certainty": 0.5
+    },
+    {
+      "id": "shape_003",
+      "type": "simple_shape",
+      "bbox": {
+        "x": 0.06666666666666667,
+        "y": 0.375,
+        "w": 0.8675,
+        "h": 0.188125
+      },
+      "shape": "rect",
+      "confidence": 0.93
+    },
+    {
+      "id": "shape_004",
+      "type": "simple_shape",
+      "bbox": {
+        "x": 0.5166666666666667,
+        "y": 0.075,
+        "w": 0.4175,
+        "h": 0.250625
+      },
+      "shape": "rect",
+      "confidence": 0.93
+    },
+    {
+      "id": "shape_005",
+      "type": "simple_shape",
+      "bbox": {
+        "x": 0.06666666666666667,
+        "y": 0.075,
+        "w": 0.4008333333333333,
+        "h": 0.250625
+      },
+      "shape": "rect",
+      "confidence": 0.93
+    }
+  ],
+  "stats": {
+    "total_elements": 27,
+    "text_elements": 21,
+    "simple_shapes": 5,
+    "complex_shapes": 1,
+    "llm_corrections": 0,
+    "processing_time_ms": 7544,
+    "quality_score": 1.0
+  },
+  "document_id": "a6ec6454-0ac6-4ff2-b730-171680ae95ef"
+}

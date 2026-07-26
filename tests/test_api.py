@@ -85,6 +85,28 @@ def test_process_rejects_text_file():
     assert resp.status_code == 400
 
 
+@patch("app.main.process_image", return_value=MOCK_PIPELINE_RESULT)
+def test_process_can_return_raw_docx(mock_pipeline):
+    resp = client.post(
+        "/process",
+        files={"image": ("drawing.jpg", io.BytesIO(make_jpeg_bytes()), "image/jpeg")},
+        data={"response_format": "docx"},
+    )
+    assert resp.status_code == 200
+    assert resp.content == b"PK\x03\x04fake_docx"
+    assert "attachment" in resp.headers["content-disposition"]
+    assert resp.headers["x-document-id"]
+
+
+def test_process_rejects_unknown_response_format():
+    resp = client.post(
+        "/process",
+        files={"image": ("drawing.jpg", io.BytesIO(make_jpeg_bytes()), "image/jpeg")},
+        data={"response_format": "pdf"},
+    )
+    assert resp.status_code == 400
+
+
 def test_process_rejects_oversized_upload():
     from app.main import _MAX_UPLOAD_BYTES
     huge = b"\xff" * (_MAX_UPLOAD_BYTES + 1)
