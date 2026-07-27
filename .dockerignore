@@ -9,5 +9,13 @@ __pycache__
 .pytest_cache
 .mypy_cache
 docs
-research.md
+md_files
 *.jsonl
+tests
+sample_drawing.png
+response.json
+output.docx
+sidecar.json
+class-diagram.png
+try_it.py
+.vscode

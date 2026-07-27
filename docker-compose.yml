@@ -7,11 +7,15 @@ services:
       - path: .env
         required: false
     environment:
-      - DATABASE_URL=postgresql://ocr:ocr@db:5432/ocr_db
+      # ponytail: "ocr"/"ocr" is a documented local-dev default, not a real
+      # credential. Override POSTGRES_PASSWORD (and this DSN, if the user is
+      # changed too) via .env for anything beyond a laptop.
+      - DATABASE_URL=postgresql://ocr:${POSTGRES_PASSWORD:-ocr}@db:5432/ocr_db
     volumes:
       # Persist downloaded PaddleOCR / PPStructure models across rebuilds so the
-      # slow first-request model download only happens once.
-      - paddle_models:/root/.paddleocr
+      # slow first-request model download only happens once. Must match the
+      # non-root `appuser` home directory baked into the Dockerfile.
+      - paddle_models:/home/appuser/.paddleocr
     depends_on:
       db:
         condition: service_healthy
@@ -21,7 +25,8 @@ services:
     image: postgres:15-alpine
     environment:
       POSTGRES_USER: ocr
-      POSTGRES_PASSWORD: ocr
+      # Local-dev default; override in .env for any real deployment.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ocr}
       POSTGRES_DB: ocr_db
     volumes:
       - pgdata:/var/lib/postgresql/data
