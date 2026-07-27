@@ -29,9 +29,22 @@ async def health():
 
 
 _ALLOWED_CONTENT_TYPES = {
-    "image/jpeg", "image/png", "image/tiff", "image/bmp", "image/webp"
+    "image/jpeg", "image/png", "image/tiff", "image/bmp"
 }
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+def _is_webp(raw: bytes) -> bool:
+    """WebP is refused because opencv-python is pinned to 4.6.0.66, which bundles a
+    libwebp carrying CVE-2023-4863 (heap overflow, exploited in the wild). The pin
+    can't move: paddleocr 2.7.3 requires opencv-python<=4.6.0.66.
+
+    Sniffing the bytes rather than trusting content_type is the whole point —
+    cv2.imdecode detects format from content, so a crafted WebP sent as image/png
+    would still reach the vulnerable decoder.
+    ponytail: drop this once paddleocr 3.x frees the opencv pin.
+    """
+    return len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
 
 
 _LANGUAGE_HINTS = {"ar+en", "ar", "en"}
@@ -63,6 +76,8 @@ async def process(
             status_code=413,
             detail=f"Image exceeds {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit",
         )
+    if _is_webp(raw):
+        raise HTTPException(status_code=400, detail="WebP images are not supported")
     arr = np.frombuffer(raw, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:

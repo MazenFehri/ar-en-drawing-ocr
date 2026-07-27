@@ -107,6 +107,27 @@ def test_process_rejects_unknown_response_format():
     assert resp.status_code == 400
 
 
+def test_process_rejects_webp_disguised_as_png():
+    """Content-type is attacker-controlled and cv2.imdecode sniffs the bytes, so
+    the magic-byte check is the only thing standing between a crafted WebP and
+    opencv 4.6.0.66's CVE-2023-4863 libwebp decoder."""
+    webp = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"VP8 " + b"\x00" * 32
+    resp = client.post(
+        "/process",
+        files={"image": ("evil.png", io.BytesIO(webp), "image/png")},
+    )
+    assert resp.status_code == 400
+    assert "WebP" in resp.json()["detail"]
+
+
+def test_process_rejects_webp_content_type():
+    resp = client.post(
+        "/process",
+        files={"image": ("x.webp", io.BytesIO(make_jpeg_bytes()), "image/webp")},
+    )
+    assert resp.status_code == 400
+
+
 def test_process_rejects_oversized_upload():
     from app.main import _MAX_UPLOAD_BYTES
     huge = b"\xff" * (_MAX_UPLOAD_BYTES + 1)

@@ -116,7 +116,7 @@ curl -X POST http://localhost:8000/process \
 
 | Field | Default | Meaning |
 |---|---|---|
-| `image` | required | The drawing. jpeg/png/tiff/bmp/webp, max 25 MB. |
+| `image` | required | The drawing. jpeg/png/tiff/bmp, max 25 MB. **WebP is refused** — see below. |
 | `confidence_threshold` | `0.75` | Words below this go to the LLM for correction. Must be 0.0–1.0. |
 | `language_hint` | `ar+en` | One of `ar+en`, `ar`, `en`. Picks the OCR model; `ar+en` also reads Latin and digits. |
 | `label_shapes` | from env | Ask the vision model to name complex shape crops (`llm_label` in the sidecar). |
@@ -231,3 +231,17 @@ wipes the volume and forces a re-download.)
 **`opencv-python` dependency conflict on build.**
 `paddleocr 2.7.3` requires `opencv-python<=4.6.0.66`; the pin in
 `requirements.txt` matches this.
+
+**Why WebP uploads are rejected (HTTP 400).**
+That same pin holds `opencv-python` at 4.6.0.66, which bundles a libwebp carrying
+CVE-2023-4863 — a heap buffer overflow that was exploited in the wild. Since the
+service decodes untrusted uploads, WebP is refused at the boundary by checking the
+`RIFF....WEBP` magic bytes, not the `Content-Type` header: `cv2.imdecode` detects
+format from content, so a crafted WebP sent as `image/png` would otherwise still
+reach the vulnerable decoder. Remove the check once a paddleocr upgrade frees the
+opencv pin.
+
+**Known unpatchable advisories.** `paddlepaddle 2.6.2` carries two command-injection
+advisories (PYSEC-2026-1754/-1756) fixed only on the 3.x line, which requires the
+paddleocr 3.x migration. `Pillow 10.3.0` has open advisories and should be bumped;
+nothing in the pinned tree constrains it, so this is safe to do inside a Docker build.

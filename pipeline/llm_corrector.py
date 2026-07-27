@@ -3,7 +3,9 @@ import json
 import logging
 import random
 import time
-from models.elements import TextElement, ComplexShapeElement, LLMCorrection, Element
+import cv2
+import numpy as np
+from models.elements import TextElement, ComplexShapeElement, LLMCorrection, Element, BBox
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +27,21 @@ Return ONLY a valid JSON array, no explanation."""
 # A page with many flagged words / crops can produce a payload large enough for a
 # free-tier model to reject outright, which looks identical to a rate limit or a
 # network failure from the caller's point of view. Chunk requests to keep each one
-# small. The full-page JPEG is still resent with every word-correction chunk (it's
-# the same image, just fewer words in the prompt) — that's an accepted trade-off,
-# not a fix for image size itself.
+# small. Each chunk now sends one small crop per word instead of the whole page,
+# so N small crops is usually *lighter* than one full-page JPEG — but a chunk of
+# MAX_WORDS_PER_CALL words each upscaled to MIN_CROP_HEIGHT_PX can still add up
+# (worst case ~20 base64 JPEGs). If that ever proves too large for the free tier,
+# lower MAX_WORDS_PER_CALL rather than shrinking crops — legibility matters more.
 MAX_WORDS_PER_CALL = 20
 MAX_CROPS_PER_CALL = 8
+
+# A flagged word cropped tight has no context and a 15-20px tall Arabic word is
+# unreadable to a vision model at native size — pad and upscale before sending.
+# ponytail: fixed padding/scale ceiling, not adaptive to DPI or script. Upgrade
+# path: derive from median glyph height per page if this stops being good enough.
+CROP_PAD_FRAC_OF_HEIGHT = 0.4  # padding added on each side, as a fraction of bbox height
+MIN_CROP_HEIGHT_PX = 64        # crops shorter than this get cv2.INTER_CUBIC upscaled
+MAX_CROP_UPSCALE = 8.0         # cap the scale factor so a near-zero-height bbox can't explode
 
 # Retry budget for transient failures (rate limit / network / 5xx) on a single
 # model. 3 attempts, ~1s/2s/4s base backoff with jitter, capped at MAX_BACKOFF_SECONDS
@@ -99,20 +111,34 @@ def apply_corrections(
         logger.warning("LLM correction skipped: OPENROUTER_API_KEY is not configured")
         return elements, _status("not_attempted", "not_configured")
 
+    # Decode once up front — every chunk crops out of the same page array, no
+    # need to re-decode per chunk. A page that fails to decode can't be cropped
+    # at all, so this degrades exactly like any other LLM failure: original
+    # elements back, status says why, caller never sees an exception.
+    page = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if page is None:
+        logger.warning("LLM correction skipped: page image could not be decoded")
+        return elements, _status("failed", "parse_error")
+
     client = _get_client()
-    correction_map: dict[str, dict] = {}
+    # Keyed by element id, not by OCR text: the model may alter the string it
+    # echoes back, and two identical words at different confidences (e.g. the
+    # same label twice on a page) must be corrected independently. Index-in-chunk
+    # is how the model tells us *which* image an answer belongs to; id is how we
+    # turn that back into the right element regardless of duplicate content.
+    correction_by_id: dict[str, dict] = {}
     last_status = _status("failed", "unknown")
     any_success = False
 
     for chunk in _chunks(flagged, MAX_WORDS_PER_CALL):
-        content = _build_word_content(image_bytes, chunk)
+        content = _build_word_content(page, chunk)
         try:
             corrections, chunk_status = _request_with_fallback(client, SYSTEM_PROMPT, content)
-            correction_map.update({
-                c["original"]: c
-                for c in corrections
-                if isinstance(c, dict) and "original" in c and "corrected" in c
-            })
+            for item in corrections:
+                if isinstance(item, dict) and "index" in item and "corrected" in item:
+                    i = int(item["index"])
+                    if 0 <= i < len(chunk):
+                        correction_by_id[chunk[i].id] = item
             last_status = chunk_status
             any_success = True
         except _LLMFailure as exc:
@@ -127,7 +153,7 @@ def apply_corrections(
         if not isinstance(el, TextElement) or el.confidence >= confidence_threshold:
             updated.append(el)
             continue
-        corr_data = correction_map.get(el.content)
+        corr_data = correction_by_id.get(el.id)
         # A word the model hands back unchanged was confirmed, not corrected —
         # highlighting it would paint most of the page yellow at a high threshold.
         # An empty "corrected" value is the model failing to answer, not a real
@@ -211,13 +237,44 @@ def _chunks(seq: list, size: int):
         yield seq[i:i + size]
 
 
-def _build_word_content(image_bytes: bytes, chunk: list[TextElement]) -> list[dict]:
-    img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-    prompt = _build_prompt(chunk)
-    return [
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-        {"type": "text", "text": prompt},
-    ]
+def _crop_word(page: np.ndarray, bbox: BBox) -> np.ndarray:
+    """Crop one flagged word out of the full page, with padding and upscaling.
+
+    The model can't locate a tiny word inside a whole page (that's the bug this
+    whole change fixes), so we find it for it: crop generously around the bbox
+    for context, then upscale if the crop is still too small to read.
+    """
+    h_img, w_img = page.shape[:2]
+    x, y, w, h = bbox.x * w_img, bbox.y * h_img, bbox.w * w_img, bbox.h * h_img
+    pad = max(h, 1.0) * CROP_PAD_FRAC_OF_HEIGHT
+    x0 = max(0, int(x - pad))
+    y0 = max(0, int(y - pad))
+    x1 = min(w_img, max(x0 + 1, int(x + w + pad)))
+    y1 = min(h_img, max(y0 + 1, int(y + h + pad)))
+    crop = page[y0:y1, x0:x1]
+
+    crop_h = crop.shape[0]
+    if 0 < crop_h < MIN_CROP_HEIGHT_PX:
+        scale = min(MIN_CROP_HEIGHT_PX / crop_h, MAX_CROP_UPSCALE)
+        crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    return crop
+
+
+def _build_word_content(page: np.ndarray, chunk: list[TextElement]) -> list[dict]:
+    content = []
+    for el in chunk:
+        crop = _crop_word(page, el.bbox)
+        ok, buf = cv2.imencode(".jpg", crop)
+        if not ok:
+            # Practically unreachable — _crop_word always returns a non-empty
+            # array — but the index-in-prompt/index-in-images pairing is load
+            # bearing, so on the off chance encoding fails, send a 1x1 blank
+            # placeholder rather than skip and shift every later index out of sync.
+            _, buf = cv2.imencode(".jpg", np.zeros((1, 1, 3), dtype=np.uint8))
+        b64 = base64.standard_b64encode(buf.tobytes()).decode("utf-8")
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    content.append({"type": "text", "text": _build_prompt(chunk)})
+    return content
 
 
 def _build_shape_content(chunk: list[ComplexShapeElement], crop_png_bytes: dict[str, bytes]) -> list[dict]:
@@ -358,11 +415,22 @@ def _parse_json_array(content: str) -> list[dict]:
 
 
 def _build_prompt(flagged: list[TextElement]) -> str:
-    words = [{"original": e.content, "confidence": round(e.confidence, 3)} for e in flagged]
+    # Index-based, matching _build_shape_content's "N images, in order" convention:
+    # the model answers by image position, not by echoing the string back, so a
+    # word the model rewrites or a duplicate word at a different confidence still
+    # keys back to the right element (see correction_by_id in apply_corrections).
+    words = [
+        {"index": i, "current_guess": e.content, "confidence": round(e.confidence, 3)}
+        for i, e in enumerate(flagged)
+    ]
     return (
-        f"Flagged words from OCR (confidence below threshold):\n{json.dumps(words, ensure_ascii=False)}\n\n"
-        "For each word, provide the corrected spelling and your certainty (0.0–1.0).\n"
-        'Return: [{"original": "...", "corrected": "...", "certainty": 0.0}]'
+        f"{len(flagged)} cropped word images, in order, each padded with a little "
+        "surrounding context and upscaled if small. Below is the OCR's current guess "
+        f"and confidence for each image, by index:\n{json.dumps(words, ensure_ascii=False)}\n\n"
+        "Re-read each cropped image and provide the corrected reading and your certainty "
+        "(0.0-1.0). If the current guess was already correct, return it unchanged. If the "
+        "crop truly can't be read, return an empty string and certainty 0.0 rather than guessing.\n"
+        'Return ONLY a JSON array: [{"index": 0, "corrected": "...", "certainty": 0.0}]'
     )
 
 
