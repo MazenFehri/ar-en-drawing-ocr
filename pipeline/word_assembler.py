@@ -24,6 +24,31 @@ _MIN_VISIBLE_EMU = 91_440  # 0.1 inch
 # invisible hairlines, revisit with a real min-stroke-width heuristic.
 _DEGENERATE_FLOOR_EMU = 1
 
+# 12700 EMU = 1 point (the unit w:sz is expressed in, as half-points).
+_EMU_PER_PT = 12_700
+# A word's bbox height is its measured ink extent, not a typographic line
+# box — there's no built-in ascender/descender headroom. 0.7 leaves ~30%
+# slack so tall glyphs (Arabic ascenders, English capitals+descenders like
+# "gh") don't kiss the box edges, while still using most of the box.
+# ponytail: fixed ratio, not per-script metrics; if real fonts show
+# clipping/looseness for a particular script, measure and adjust here.
+_FONT_TO_BOX_HEIGHT_RATIO = 0.7
+# ponytail: 4pt floor keeps degenerate/near-zero boxes legible-ish rather
+# than invisible; 72pt ceiling stops a single huge detected box (e.g. a
+# title) from producing absurd type. Both are round numbers, not measured —
+# revisit if real drawings show either edge getting hit often.
+_MIN_FONT_HALF_PT = 8    # 4pt
+_MAX_FONT_HALF_PT = 144  # 72pt
+
+
+def _font_sz_half_points(cy: int) -> int:
+    """Font size (in half-points, what w:sz/w:szCs expect) for a box of
+    height cy EMU. Keyed off height only — width doesn't matter (a long,
+    short label must still get a short font, not a huge one)."""
+    pt = (cy / _EMU_PER_PT) * _FONT_TO_BOX_HEIGHT_RATIO
+    half_pt = round(pt * 2)
+    return max(_MIN_FONT_HALF_PT, min(_MAX_FONT_HALF_PT, half_pt))
+
 # DrawingML preset geometry names for each simple shape type
 _WORD_SHAPE = {
     "circle": "ellipse",
@@ -185,6 +210,7 @@ def _text_box_xml(text: str, left: int, top: int, cx: int, cy: int,
     )
     # Escape XML special chars in text
     safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    sz = _font_sz_half_points(cy)
     return _anchor_wrap(left, top, cx, cy,
         f'<a:graphic {ns_a}>'
         '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
@@ -198,12 +224,23 @@ def _text_box_xml(text: str, left: int, top: int, cx: int, cy: int,
         '<wps:txbx>'
         f'<w:txbxContent {ns_w}>'
         f'<w:p><w:pPr>{bidi_tag}</w:pPr>'
-        f'<w:r><w:rPr>{hl_tag}<w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>'
+        f'<w:r><w:rPr>{hl_tag}<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/></w:rPr>'
         f'<w:t xml:space="preserve">{safe_text}</w:t>'
         '</w:r></w:p>'
         '</w:txbxContent>'
         '</wps:txbx>'
-        '<wps:bodyPr/>'
+        # wrap="none": a slightly-too-wide string overflows visibly rather
+        # than wrapping to a 2nd line and getting clipped by box height —
+        # for this pipeline, visible overflow beats silent data loss.
+        # anchor="ctr": centres the single line vertically in the box so
+        # it isn't glued to the top edge with the ~30% slack below it.
+        # Insets zeroed: the box is the exact OCR ink extent already;
+        # Word's default 0.1in/0.05in padding would eat most of a small box.
+        # No autofit child: spAutoFit would resize the *shape* to fit the
+        # text, defeating the positional fidelity this pipeline exists for;
+        # normAutofit shrinks text by its own heuristic scale, fighting the
+        # font size we just computed. Omitting is equivalent to noAutofit.
+        '<wps:bodyPr wrap="none" anchor="ctr" lIns="0" tIns="0" rIns="0" bIns="0"/>'
         '</wps:wsp>'
         '</a:graphicData>'
         '</a:graphic>',

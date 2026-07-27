@@ -94,6 +94,19 @@ class _LLMFailure(Exception):
         self.reason = reason
 
 
+class _MalformedCompletionError(Exception):
+    """Raised when a chat completion comes back HTTP 200 with nothing usable in
+    it: choices missing/empty, or the first choice's message.content is None.
+    OpenRouter's gateway does this when an upstream provider errors but the
+    gateway itself still returns 200 with an `error` field in the body instead
+    of a real completion -- indexing straight into response.choices[0] then
+    raises a TypeError that has nothing to do with the actual cause. Not added
+    to _call_with_retry's retryable tuple: like a 400/401 this fails the model
+    once and lets the fallback chain move on rather than burning retry budget
+    on a response shape that won't change on retry.
+    """
+
+
 def _status(state: str, reason: str | None = None, model: str | None = None) -> dict:
     """The shape returned alongside results from apply_corrections / label_complex_shapes.
 
@@ -101,8 +114,8 @@ def _status(state: str, reason: str | None = None, model: str | None = None) -> 
     reason (when not None):
       not_attempted -> "no_flagged_words" / "no_shapes_to_label" / "not_configured"
       failed        -> "rate_limited" / "invalid_model" / "unauthorized" /
-                       "network" / "server_error" / "parse_error" / "timed_out" /
-                       "unknown"
+                       "network" / "server_error" / "parse_error" /
+                       "empty_response" / "timed_out" / "unknown"
     model: the model ID that produced a "success", else None.
     """
     return {"state": state, "reason": reason, "model": model}
@@ -440,7 +453,36 @@ def _call_with_hard_timeout(client, model: str, system_prompt: str, user_content
         raise TimeoutError(f"LLM call to {model} exceeded {timeout_s:.1f}s hard ceiling")
     if "error" in outcome:
         raise outcome["error"]
-    return outcome["response"].choices[0].message.content
+    response = outcome["response"]
+    choices = getattr(response, "choices", None)
+    message = choices[0].message if choices else None
+    content = getattr(message, "content", None) if message is not None else None
+    if content is None:
+        detail = _extract_error_detail(response)
+        raise _MalformedCompletionError(
+            f"empty completion from {model}" + (f": {detail}" if detail else "")
+        )
+    return content
+
+
+def _extract_error_detail(response) -> str | None:
+    """OpenRouter can return HTTP 200 with null/empty choices and the real
+    explanation (provider name, upstream status, message) in a top-level
+    `error` field the SDK's ChatCompletion type doesn't declare as a field.
+    The SDK's response models are pydantic with extra="allow" though, so
+    unknown top-level fields survive on `model_extra` instead of being
+    dropped -- that's the only place left to read this, since by the time
+    _call_with_hard_timeout sees `response` the SDK has already parsed the
+    HTTP body and thrown the raw bytes away.
+    """
+    err = (getattr(response, "model_extra", None) or {}).get("error")
+    if not err:
+        return None
+    if not isinstance(err, dict):
+        return str(err)
+    meta = err.get("metadata") or {}
+    bits = [err.get("message"), meta.get("provider_name"), meta.get("raw")]
+    return " | ".join(str(b) for b in bits if b)
 
 
 def _backoff_seconds(exc: Exception, base_delay: float) -> float:
@@ -491,6 +533,8 @@ def _classify_error(exc: Exception) -> str:
         return "server_error"
     if isinstance(exc, json.JSONDecodeError):
         return "parse_error"
+    if isinstance(exc, _MalformedCompletionError):
+        return "empty_response"
     return "unknown"
 
 

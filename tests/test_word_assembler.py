@@ -133,3 +133,93 @@ def test_letterbox_keeps_square_shape_square_on_landscape_page():
     result = assemble_document(elements, crop_images={}, page_aspect=2.0)
     cx, cy = _last_extent(result)
     assert cx == cy
+
+
+def _sz_values(docx_bytes):
+    """Pull every <w:sz w:val="N"/> from the run's raw XML, in order."""
+    doc = Document(io.BytesIO(docx_bytes))
+    xml = doc.paragraphs[0].runs[0]._r.xml
+    return [int(v) for v in re.findall(r'<w:sz w:val="(\d+)"/>', xml)]
+
+
+def test_font_size_scales_with_box_height():
+    # Bug 1: box size tracks the OCR bbox, but font size was hardcoded to
+    # 10pt (w:sz=20) regardless of box height. A short box must now get a
+    # smaller font than a tall one.
+    elements = [
+        make_text_el("t0", "small", x=0.05, y=0.05, lang="english"),
+    ]
+    elements[0].bbox.h = 0.01
+    small_sz = _sz_values(assemble_document(elements, crop_images={}))[0]
+
+    elements[0].bbox.h = 0.2
+    large_sz = _sz_values(assemble_document(elements, crop_images={}))[0]
+
+    assert large_sz > small_sz
+
+
+def test_font_size_has_a_minimum_clamp():
+    # A near-zero-height text box (tiny OCR artefact) must not shrink the
+    # font below the legibility floor (4pt == w:sz 8).
+    from pipeline.word_assembler import _MIN_FONT_HALF_PT
+    elements = [make_text_el("t0", "x", x=0.05, y=0.05)]
+    elements[0].bbox.h = 0.0001
+    sz = _sz_values(assemble_document(elements, crop_images={}))[0]
+    assert sz == _MIN_FONT_HALF_PT
+
+
+def test_font_size_has_a_maximum_clamp():
+    # A huge detected box (e.g. a title) must not produce absurd type;
+    # capped at 72pt == w:sz 144.
+    from pipeline.word_assembler import _MAX_FONT_HALF_PT
+    elements = [make_text_el("t0", "TITLE", x=0.05, y=0.05)]
+    elements[0].bbox.h = 5.0
+    sz = _sz_values(assemble_document(elements, crop_images={}))[0]
+    assert sz == _MAX_FONT_HALF_PT
+
+
+def test_font_size_keys_off_height_not_width_for_wide_short_label():
+    # A long-but-short label (wide box, small height) must get a small
+    # font driven by height alone, not inflated by the box's width/area.
+    from pipeline.word_assembler import _MIN_FONT_HALF_PT
+    elements = [make_text_el("t0", "a very long room label", x=0.02, y=0.05)]
+    elements[0].bbox.w = 0.9
+    elements[0].bbox.h = 0.01
+    sz = _sz_values(assemble_document(elements, crop_images={}))[0]
+    assert sz < 20  # well under the old hardcoded 10pt-equivalent-ish range
+    assert sz >= _MIN_FONT_HALF_PT
+
+
+def test_text_box_body_pr_has_zeroed_insets_and_no_wrap():
+    elements = [make_text_el("t0", "entrance")]
+    result = assemble_document(elements, crop_images={})
+    doc = Document(io.BytesIO(result))
+    xml = doc.paragraphs[0].runs[0]._r.xml
+    assert 'wrap="none"' in xml
+    assert 'lIns="0"' in xml
+    assert 'tIns="0"' in xml
+    assert 'rIns="0"' in xml
+    assert 'bIns="0"' in xml
+
+
+def test_document_with_varied_box_heights_is_valid_zip_and_xml():
+    # End-to-end guard against schema/order mistakes: build a doc with
+    # tiny/normal/large boxes and Arabic+English content, then confirm the
+    # result is still a well-formed .docx (valid zip, parseable document.xml).
+    import zipfile
+    from lxml import etree as ET
+
+    elements = [
+        make_text_el("t0", "tiny", x=0.05, y=0.05, lang="english"),
+        make_text_el("t1", "normal room", x=0.05, y=0.2, lang="english"),
+        make_text_el("t2", "غرفة كبيرة", x=0.05, y=0.5, lang="arabic"),
+    ]
+    elements[0].bbox.h = 0.005
+    elements[1].bbox.h = 0.03
+    elements[2].bbox.h = 0.15
+
+    result = assemble_document(elements, crop_images={})
+    zf = zipfile.ZipFile(io.BytesIO(result))
+    assert zf.testzip() is None  # valid zip, no corrupt members
+    xml_bytes = zf.read("word/document.xml")
+    ET.fromstring(xml_bytes)  # raises if malformed

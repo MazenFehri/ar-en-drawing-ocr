@@ -381,6 +381,162 @@ def test_budget_is_shared_across_chunks_not_reset_per_chunk(mock_client_fn):
     assert [e.content for e in result] == ["entrnce", "kitcen", "غرفة"]
 
 
+# --- Malformed / empty completion responses (the 'choices' TypeError bug) ---
+# OpenRouter's gateway can return HTTP 200 with `choices: null` and an `error`
+# body when an upstream provider fails but the gateway itself doesn't -- the
+# production log evidence this reproduces was `TypeError: 'NoneType' object is
+# not subscriptable` from indexing straight into response.choices[0].
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.openrouter_fallback_models", "fallback/model:free")
+@patch("pipeline.llm_corrector._get_client")
+def test_none_choices_treated_as_model_failure_and_fallback_succeeds(mock_client_fn):
+    """A None `choices` must not raise a TypeError out of apply_corrections --
+    it should fail just this model and let the fallback chain proceed, exactly
+    like any other classified failure."""
+    bad_resp = MagicMock()
+    bad_resp.choices = None
+    bad_resp.model_extra = {}
+
+    ok_choice = MagicMock()
+    ok_choice.message.content = MOCK_LLM_RESPONSE
+    ok_resp = MagicMock()
+    ok_resp.choices = [ok_choice]
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = [bad_resp, ok_resp]
+    mock_client_fn.return_value = mock_client
+
+    result, status = apply_corrections(
+        [make_text_el("t1", "entrnce", 0.48)], FAKE_PAGE, confidence_threshold=0.75
+    )
+
+    assert mock_client.chat.completions.create.call_count == 2
+    assert status["state"] == "success"
+    assert status["model"] == "fallback/model:free"
+    corrected = [e for e in result if e.llm_correction is not None]
+    assert corrected[0].llm_correction.corrected == "entrance"
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.openrouter_fallback_models", "")
+@patch("pipeline.llm_corrector._get_client")
+def test_empty_choices_list_reports_empty_response(mock_client_fn):
+    """An empty list is a distinct case from None -- same TypeError-shaped bug
+    (`choices[0]` on an empty list is an IndexError, not a TypeError, but
+    equally unguarded), must be handled the same way."""
+    bad_resp = MagicMock()
+    bad_resp.choices = []
+    bad_resp.model_extra = {}
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = bad_resp
+    mock_client_fn.return_value = mock_client
+
+    result, status = apply_corrections(
+        [make_text_el("t1", "entrnce", 0.48)], FAKE_PAGE, confidence_threshold=0.75
+    )
+
+    assert result[0].content == "entrnce"
+    assert status["state"] == "failed"
+    assert status["reason"] == "empty_response"
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.openrouter_fallback_models", "")
+@patch("pipeline.llm_corrector._get_client")
+def test_none_message_content_reports_empty_response(mock_client_fn):
+    """choices is present and non-empty but message.content is None -- the
+    third distinct malformed-response shape."""
+    choice = MagicMock()
+    choice.message.content = None
+    bad_resp = MagicMock()
+    bad_resp.choices = [choice]
+    bad_resp.model_extra = {}
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = bad_resp
+    mock_client_fn.return_value = mock_client
+
+    result, status = apply_corrections(
+        [make_text_el("t1", "entrnce", 0.48)], FAKE_PAGE, confidence_threshold=0.75
+    )
+
+    assert result[0].content == "entrnce"
+    assert status["state"] == "failed"
+    assert status["reason"] == "empty_response"
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.openrouter_fallback_models", "")
+@patch("pipeline.llm_corrector._get_client")
+def test_error_payload_is_logged_not_discarded(mock_client_fn, caplog):
+    """When OpenRouter's 200-with-error body carries the real explanation
+    (provider name, upstream message), that must end up in the log instead of
+    being thrown away in favour of a bare TypeError."""
+    bad_resp = MagicMock()
+    bad_resp.choices = None
+    bad_resp.model_extra = {
+        "error": {
+            "message": "Provider returned error",
+            "code": 429,
+            "metadata": {
+                "raw": "google/gemma-4-31b-it:free is temporarily rate-limited upstream",
+                "provider_name": "Google AI Studio",
+            },
+        }
+    }
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = bad_resp
+    mock_client_fn.return_value = mock_client
+
+    with caplog.at_level("WARNING", logger="pipeline.llm_corrector"):
+        result, status = apply_corrections(
+            [make_text_el("t1", "entrnce", 0.48)], FAKE_PAGE, confidence_threshold=0.75
+        )
+
+    assert status["reason"] == "empty_response"
+    assert result[0].content == "entrnce"
+    assert "Provider returned error" in caplog.text
+    assert "Google AI Studio" in caplog.text
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.openrouter_fallback_models", "")
+@patch("pipeline.llm_corrector._get_client")
+def test_real_sdk_object_with_null_choices_is_handled(mock_client_fn):
+    """Not a MagicMock artifact: build an actual openai ChatCompletion the same
+    way the SDK's own base client builds one from a JSON body (construct_type,
+    not model_validate -- see openai._base_client._process_response). This is
+    the real shape _call_with_hard_timeout receives from a live call when
+    OpenRouter sends `choices: null`; model_validate would reject that body
+    with a pydantic ValidationError instead, which is not the exception the
+    production log shows, so this confirms construct_type is really what runs.
+    """
+    from openai._models import construct_type
+    from openai.types.chat import ChatCompletion
+
+    body = {
+        "id": "gen-1", "object": "chat.completion", "created": 1, "model": "m",
+        "choices": None,
+        "error": {
+            "message": "Provider returned error", "code": 429,
+            "metadata": {"raw": "rate-limited upstream", "provider_name": "Google AI Studio"},
+        },
+    }
+    bad_resp = construct_type(type_=ChatCompletion, value=body)
+    assert bad_resp.choices is None  # sanity: construct_type didn't coerce/validate this away
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = bad_resp
+    mock_client_fn.return_value = mock_client
+
+    result, status = apply_corrections(
+        [make_text_el("t1", "entrnce", 0.48)], FAKE_PAGE, confidence_threshold=0.75
+    )
+
+    assert status["reason"] == "empty_response"
+    assert result[0].content == "entrnce"
+
+
 def test_build_prompt_contains_words():
     elements = [make_text_el("t0", "entrnce", 0.48)]
     prompt = _build_prompt(elements)

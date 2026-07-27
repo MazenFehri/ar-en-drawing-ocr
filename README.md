@@ -176,7 +176,13 @@ ran" (`state: "failed"` / `"not_attempted"`) — the counts alone cannot tell th
 |---|---|
 | `success` | `null`; `model` names the model that answered |
 | `not_attempted` | `no_flagged_words`, `no_shapes_to_label`, `not_configured` |
-| `failed` | `rate_limited`, `invalid_model`, `unauthorized`, `network`, `server_error`, `parse_error`, `timed_out`, `unknown` |
+| `failed` | `rate_limited`, `invalid_model`, `unauthorized`, `network`, `server_error`, `parse_error`, `empty_response`, `timed_out`, `unknown` |
+
+`empty_response` means the provider returned HTTP 200 with no usable completion —
+OpenRouter's gateway does this when an upstream provider fails, putting the real reason
+in an `error` field rather than a non-200 status. The provider's message is extracted
+and logged; check the container log for it. Distinct from `parse_error`, which means we
+got content and could not parse it.
 
 LLM work is bounded to `TOTAL_LLM_BUDGET_SECONDS` (60s) — a real wall-clock ceiling,
 enforced by running each model call under a `thread.join(timeout=...)`, not just a
