@@ -56,7 +56,8 @@ The `.env` file in the project root is already populated. If starting fresh, set
 
 ```env
 OPENROUTER_API_KEY=your_key_here
-OPENROUTER_MODEL=google/gemma-4-31b-it:free
+OPENROUTER_MODEL=google/gemma-4-26b-a4b-it:free
+OPENROUTER_FALLBACK_MODELS=google/gemma-4-31b-it:free,nvidia/nemotron-nano-12b-v2-vl:free
 CONFIDENCE_THRESHOLD=0.75
 LABEL_SHAPES=true
 DATABASE_URL=postgresql://ocr:ocr@localhost:5432/ocr_db
@@ -138,11 +139,28 @@ Response:
       "simple_shapes": 8,
       "complex_shapes": 4,
       "llm_corrections": 5,
-      "processing_time_ms": 1200
+      "processing_time_ms": 1200,
+      "quality_score": 0.87,
+      "llm_status": { "state": "success", "reason": null, "model": "google/gemma-4-26b-a4b-it:free" },
+      "shape_label_status": { "state": "failed", "reason": "rate_limited", "model": null }
     }
   }
 }
 ```
+
+**Always check `llm_status` before trusting `llm_corrections: 0`.** Zero corrections
+means either "the model confirmed every word" (`state: "success"`) or "the model never
+ran" (`state: "failed"` / `"not_attempted"`) — the counts alone cannot tell them apart.
+
+| `state` | `reason` |
+|---|---|
+| `success` | `null`; `model` names the model that answered |
+| `not_attempted` | `no_flagged_words`, `no_shapes_to_label`, `not_configured` |
+| `failed` | `rate_limited`, `invalid_model`, `unauthorized`, `network`, `server_error`, `parse_error`, `timed_out`, `unknown` |
+
+LLM work is bounded to `TOTAL_LLM_BUDGET_SECONDS` (60s) across the entire retry and
+fallback chain. When it expires the pipeline returns the document built from raw OCR
+text and reports `timed_out` — it never fails the request.
 
 Decode the `.docx`:
 ```python
@@ -177,7 +195,18 @@ image → preprocess → layout segmentation → shape detection
 - **OCR:** PaddleOCR PP-OCRv4, Arabic + English, runs locally
 - **Layout:** PaddleOCR PP-Structure region segmentation
 - **LLM correction:** OpenRouter free vision model (configurable, optional)
-- **Word output:** Absolutely positioned DrawingML objects (text boxes, shapes, embedded images)
+- **Shape detection:** OpenCV contour analysis with `RETR_CCOMP` so nested content
+  (interior walls, fixtures, furniture inside a room outline) survives — `RETR_EXTERNAL`
+  keeps only the outermost contour of each blob and discards everything within it.
+  Whatever is left unclassified is captured as **residual ink**: dilated, grouped into
+  connected components and embedded as positioned images, so drawing we cannot name
+  still appears in the output.
+- **Page geometry:** element bboxes are relative fractions, so the page is **letterboxed**
+  to the source aspect ratio (and flipped to landscape for wide drawings). Mapping `x` by
+  page width and `y` by page height independently stretches any non-A4-shaped input.
+- **Word output:** Absolutely positioned DrawingML objects (text boxes, shapes, embedded images).
+  Simple shapes render outline-only — Word's default shape style is a solid blue fill, which
+  would hide the text underneath.
 - **Arabic text:** PaddleOCR reports Arabic in *visual* order (the order glyphs sit on
   the page). `utils.bidi.to_logical_order` converts it back to logical order before it
   reaches the sidecar or Word — without that, `<w:bidi/>` reverses it a second time and

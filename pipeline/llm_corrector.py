@@ -1,6 +1,8 @@
 import base64
 import json
 import logging
+import random
+import time
 from models.elements import TextElement, ComplexShapeElement, LLMCorrection, Element
 
 logger = logging.getLogger(__name__)
@@ -20,36 +22,105 @@ Common terms — Arabic: غرفة النوم (bedroom), الصالة (living roo
 English: bedroom, bathroom, kitchen, entrance, corridor, living room, dining room, parking, balcony.
 Return ONLY a valid JSON array, no explanation."""
 
+# A page with many flagged words / crops can produce a payload large enough for a
+# free-tier model to reject outright, which looks identical to a rate limit or a
+# network failure from the caller's point of view. Chunk requests to keep each one
+# small. The full-page JPEG is still resent with every word-correction chunk (it's
+# the same image, just fewer words in the prompt) — that's an accepted trade-off,
+# not a fix for image size itself.
+MAX_WORDS_PER_CALL = 20
+MAX_CROPS_PER_CALL = 8
+
+# Retry budget for transient failures (rate limit / network / 5xx) on a single
+# model. 3 attempts, ~1s/2s/4s base backoff with jitter, capped at MAX_BACKOFF_SECONDS
+# so a rate-limited free tier can't stall a request for minutes. See _backoff_seconds.
+MAX_RETRY_ATTEMPTS = 3
+BASE_BACKOFF_SECONDS = 1.0
+MAX_BACKOFF_SECONDS = 8.0
+
+# The openai SDK's own default timeout is 600s (10 minutes) and it does its own
+# silent retries (max_retries=2) on top of ours unless told not to. Both are
+# exactly the kind of "hangs for minutes" behaviour the caller must not see, so
+# the client below is built with an explicit timeout and max_retries=0 — our
+# retry loop is the only one in control of backoff and attempt count.
+REQUEST_TIMEOUT_SECONDS = 30.0
+
+# Per-model bounds still multiply out: 3 models x 3 attempts x 30s + backoff is
+# over 5 minutes with the provider down, and correction is only an enhancement —
+# nobody should wait that long for a document we can already produce. One wall
+# clock budget across the whole fallback chain caps it regardless of the maths.
+# ponytail: single flat budget, not a per-stage one. If shape labelling and word
+# correction ever need different allowances, pass the budget in per call site.
+TOTAL_LLM_BUDGET_SECONDS = 60.0
+
+
+class _LLMFailure(Exception):
+    """Every configured model failed. Carries the classified reason for the last
+    failure so the caller can report something more useful than "it broke"."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _status(state: str, reason: str | None = None, model: str | None = None) -> dict:
+    """The shape returned alongside results from apply_corrections / label_complex_shapes.
+
+    state: "not_attempted" | "success" | "failed"
+    reason (when not None):
+      not_attempted -> "no_flagged_words" / "no_shapes_to_label" / "not_configured"
+      failed        -> "rate_limited" / "invalid_model" / "unauthorized" /
+                       "network" / "server_error" / "parse_error" / "unknown"
+    model: the model ID that produced a "success", else None.
+    """
+    return {"state": state, "reason": reason, "model": model}
+
 
 def apply_corrections(
     elements: list[Element],
     image_bytes: bytes,
     confidence_threshold: float = 0.75,
-) -> list[Element]:
+) -> tuple[list[Element], dict]:
     """Call OpenRouter LLM to correct low-confidence OCR words in the element list.
 
-    Returns a new list with corrections applied and highlights set.
+    Returns (new_elements, status) — see _status() for the exact shape. LLM
+    correction is an optional enhancement: any failure (rate limit, network,
+    invalid model, malformed response) degrades gracefully to the original
+    elements rather than failing the request, but unlike before, the caller can
+    now tell *why* nothing changed instead of guessing.
     """
     flagged = [e for e in elements
                if isinstance(e, TextElement) and e.confidence < confidence_threshold]
     if not flagged:
-        return elements
+        return elements, _status("not_attempted", "no_flagged_words")
 
-    # LLM correction is an optional enhancement. If the provider is unavailable
-    # (rate limit, network error, invalid model, malformed response), skip it and
-    # return the elements with their original OCR text rather than failing the
-    # whole request.
-    try:
-        client = _get_client()
-        corrections = _call_llm(client, image_bytes, flagged)
-        correction_map = {
-            c["original"]: c
-            for c in corrections
-            if isinstance(c, dict) and "original" in c and "corrected" in c
-        }
-    except Exception as exc:
-        logger.warning("LLM correction skipped (%s): %s", type(exc).__name__, exc)
-        return elements
+    from app.config import settings
+    if not settings.openrouter_api_key:
+        logger.warning("LLM correction skipped: OPENROUTER_API_KEY is not configured")
+        return elements, _status("not_attempted", "not_configured")
+
+    client = _get_client()
+    correction_map: dict[str, dict] = {}
+    last_status = _status("failed", "unknown")
+    any_success = False
+
+    for chunk in _chunks(flagged, MAX_WORDS_PER_CALL):
+        content = _build_word_content(image_bytes, chunk)
+        try:
+            corrections, chunk_status = _request_with_fallback(client, SYSTEM_PROMPT, content)
+            correction_map.update({
+                c["original"]: c
+                for c in corrections
+                if isinstance(c, dict) and "original" in c and "corrected" in c
+            })
+            last_status = chunk_status
+            any_success = True
+        except _LLMFailure as exc:
+            logger.warning("LLM correction chunk skipped (%s)", exc.reason)
+            last_status = _status("failed", exc.reason)
+
+    if not any_success:
+        return elements, last_status
 
     updated = []
     for el in elements:
@@ -59,7 +130,9 @@ def apply_corrections(
         corr_data = correction_map.get(el.content)
         # A word the model hands back unchanged was confirmed, not corrected —
         # highlighting it would paint most of the page yellow at a high threshold.
-        if corr_data and corr_data["corrected"] != el.content:
+        # An empty "corrected" value is the model failing to answer, not a real
+        # correction — applying it would silently blank out real OCR text.
+        if corr_data and corr_data.get("corrected") and corr_data["corrected"] != el.content:
             certainty = corr_data.get("certainty", 0.0)
             updated.append(el.model_copy(update={
                 "content": corr_data["corrected"],
@@ -72,94 +145,201 @@ def apply_corrections(
             }))
         else:
             updated.append(el)
-    return updated
+    return updated, last_status
 
 
 def label_complex_shapes(
     elements: list[Element],
     crop_png_bytes: dict[str, bytes],
-) -> list[Element]:
+) -> tuple[list[Element], dict]:
     """Ask the vision model what each complex shape crop depicts.
 
-    Fills llm_label / llm_label_certainty on ComplexShapeElements. Like word
-    correction this is best-effort: a provider failure leaves the labels unset
-    rather than failing the request.
+    Returns (new_elements, status) — see _status(). Fills llm_label /
+    llm_label_certainty on ComplexShapeElements. Like word correction this is
+    best-effort: a provider failure leaves the labels unset rather than failing
+    the request, and the returned status says why.
     """
     targets = [
         e for e in elements
         if isinstance(e, ComplexShapeElement) and e.id in crop_png_bytes
     ]
     if not targets:
-        return elements
+        return elements, _status("not_attempted", "no_shapes_to_label")
 
-    try:
-        client = _get_client()
-        raw = _call_shape_llm(client, targets, crop_png_bytes)
-        by_index = {
-            int(item["index"]): item
-            for item in raw
-            if isinstance(item, dict) and "index" in item and "label" in item
-        }
-    except Exception as exc:
-        logger.warning("Shape labelling skipped (%s): %s", type(exc).__name__, exc)
-        return elements
+    from app.config import settings
+    if not settings.openrouter_api_key:
+        logger.warning("Shape labelling skipped: OPENROUTER_API_KEY is not configured")
+        return elements, _status("not_attempted", "not_configured")
 
-    labels = {
-        el.id: by_index[i] for i, el in enumerate(targets) if i in by_index
-    }
+    client = _get_client()
+    by_id: dict[str, dict] = {}
+    last_status = _status("failed", "unknown")
+    any_success = False
+
+    for start in range(0, len(targets), MAX_CROPS_PER_CALL):
+        chunk = targets[start:start + MAX_CROPS_PER_CALL]
+        content = _build_shape_content(chunk, crop_png_bytes)
+        try:
+            raw, chunk_status = _request_with_fallback(client, SHAPE_PROMPT, content)
+            for item in raw:
+                if isinstance(item, dict) and "index" in item and "label" in item:
+                    i = int(item["index"])
+                    if 0 <= i < len(chunk):
+                        by_id[chunk[i].id] = item
+            last_status = chunk_status
+            any_success = True
+        except _LLMFailure as exc:
+            logger.warning("Shape labelling chunk skipped (%s)", exc.reason)
+            last_status = _status("failed", exc.reason)
+
+    if not any_success:
+        return elements, last_status
+
     return [
         el.model_copy(update={
-            "llm_label": labels[el.id]["label"],
-            "llm_label_certainty": float(labels[el.id].get("certainty", 0.0)),
+            "llm_label": by_id[el.id]["label"],
+            "llm_label_certainty": float(by_id[el.id].get("certainty", 0.0)),
         })
-        if isinstance(el, ComplexShapeElement) and el.id in labels
+        if isinstance(el, ComplexShapeElement) and el.id in by_id
         else el
         for el in elements
+    ], last_status
+
+
+def _chunks(seq: list, size: int):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def _build_word_content(image_bytes: bytes, chunk: list[TextElement]) -> list[dict]:
+    img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    prompt = _build_prompt(chunk)
+    return [
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+        {"type": "text", "text": prompt},
     ]
 
 
-def _call_shape_llm(client, targets, crop_png_bytes: dict[str, bytes]) -> list[dict]:
+def _build_shape_content(chunk: list[ComplexShapeElement], crop_png_bytes: dict[str, bytes]) -> list[dict]:
     content = []
-    for el in targets:
+    for el in chunk:
         b64 = base64.standard_b64encode(crop_png_bytes[el.id]).decode("utf-8")
         content.append({
             "type": "image_url",
             "image_url": {"url": f"data:image/png;base64,{b64}"},
         })
-    content.append({"type": "text", "text": f"{len(targets)} symbol images, in order."})
-
-    response = client.chat.completions.create(
-        model=_get_model(),
-        max_tokens=1024,
-        messages=[
-            {"role": "system", "content": SHAPE_PROMPT},
-            {"role": "user", "content": content},
-        ],
-    )
-    return _parse_json_array(response.choices[0].message.content)
+    content.append({"type": "text", "text": f"{len(chunk)} symbol images, in order."})
+    return content
 
 
-def _call_llm(client, image_bytes: bytes, flagged: list[TextElement]) -> list[dict]:
-    img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-    prompt = _build_prompt(flagged)
+def _request_with_fallback(client, system_prompt: str, user_content: list[dict]) -> tuple[list[dict], dict]:
+    """Try each configured model in order (primary, then fallbacks), retrying
+    transient failures on each with backoff. Raises _LLMFailure if every model
+    in the chain fails.
+    """
+    models = _model_chain()
+    last_reason = "unknown"
+    deadline = time.monotonic() + TOTAL_LLM_BUDGET_SECONDS
+    for i, model in enumerate(models):
+        if time.monotonic() >= deadline:
+            logger.warning("LLM budget of %.0fs exhausted, giving up", TOTAL_LLM_BUDGET_SECONDS)
+            raise _LLMFailure("timed_out")
+        try:
+            content = _call_with_retry(client, model, system_prompt, user_content, deadline=deadline)
+            parsed = _parse_json_array(content)
+            return parsed, _status("success", None, model=model)
+        except Exception as exc:
+            last_reason = _classify_error(exc)
+            is_last = i == len(models) - 1
+            logger.warning(
+                "LLM call to %s failed (%s: %s)%s",
+                model, type(exc).__name__, exc,
+                "" if is_last else ", trying next fallback model",
+            )
+    raise _LLMFailure(last_reason)
 
-    response = client.chat.completions.create(
-        model=_get_model(),
-        max_tokens=1024,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:image/jpeg;base64,{img_b64}"
-                    }},
-                    {"type": "text", "text": prompt},
+
+def _call_with_retry(client, model: str, system_prompt: str, user_content: list[dict],
+                      max_attempts: int = MAX_RETRY_ATTEMPTS,
+                      deadline: float | None = None) -> str:
+    """Call one model with bounded retry on transient failures only. A 429 (rate
+    limit) or 5xx / connection error is worth retrying; a 400 (bad request /
+    invalid model) or 401 (bad key) will just fail the same way again, so those
+    propagate immediately and let the caller move to the next fallback model.
+    """
+    from openai import RateLimitError, APIConnectionError, InternalServerError
+    retryable = (RateLimitError, APIConnectionError, InternalServerError)
+
+    delay = BASE_BACKOFF_SECONDS
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                max_tokens=1024,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
                 ],
-            },
-        ],
+            )
+            return response.choices[0].message.content
+        except retryable as exc:
+            if attempt == max_attempts:
+                raise
+            sleep_s = _backoff_seconds(exc, delay)
+            # Don't sleep into the budget: if waiting would overrun it, give up on
+            # this model now so the chain can fail fast rather than fail late.
+            if deadline is not None and time.monotonic() + sleep_s >= deadline:
+                raise
+            logger.info(
+                "LLM call to %s hit %s (attempt %d/%d), retrying in %.1fs",
+                model, type(exc).__name__, attempt, max_attempts, sleep_s,
+            )
+            time.sleep(sleep_s)
+            delay = min(delay * 2, MAX_BACKOFF_SECONDS)
+
+
+def _backoff_seconds(exc: Exception, base_delay: float) -> float:
+    """OpenRouter sometimes sends Retry-After on a 429 — honour it if present and
+    sane, otherwise fall back to exponential backoff with jitter. Always capped
+    so one slow retry can't blow the latency budget.
+    """
+    retry_after = _retry_after_seconds(exc)
+    if retry_after is not None:
+        return min(retry_after, MAX_BACKOFF_SECONDS)
+    return min(base_delay + random.uniform(0, base_delay * 0.5), MAX_BACKOFF_SECONDS)
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    response = getattr(exc, "response", None)
+    header = response.headers.get("retry-after") if response is not None else None
+    if not header:
+        return None
+    try:
+        seconds = float(header)
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _classify_error(exc: Exception) -> str:
+    """Map an exception to a reason code the caller can act on."""
+    from openai import (
+        RateLimitError, BadRequestError, NotFoundError, AuthenticationError,
+        PermissionDeniedError, APIConnectionError, InternalServerError,
     )
-    return _parse_json_array(response.choices[0].message.content)
+    if isinstance(exc, RateLimitError):
+        return "rate_limited"
+    if isinstance(exc, (BadRequestError, NotFoundError)):
+        return "invalid_model"
+    if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+        return "unauthorized"
+    if isinstance(exc, APIConnectionError):
+        return "network"
+    if isinstance(exc, InternalServerError):
+        return "server_error"
+    if isinstance(exc, json.JSONDecodeError):
+        return "parse_error"
+    return "unknown"
 
 
 def _parse_json_array(content: str) -> list[dict]:
@@ -186,6 +366,19 @@ def _build_prompt(flagged: list[TextElement]) -> str:
     )
 
 
+def _model_chain() -> list[str]:
+    """Primary model first, then configured fallbacks, de-duplicated in order."""
+    from app.config import settings
+    chain = [settings.openrouter_model, *settings.openrouter_fallback_model_list]
+    seen = set()
+    out = []
+    for m in chain:
+        if m and m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
 def _get_client():
     global _client_instance
     if _client_instance is None:
@@ -194,10 +387,7 @@ def _get_client():
         _client_instance = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=settings.openrouter_api_key,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            max_retries=0,  # we do our own bounded retry/backoff above
         )
     return _client_instance
-
-
-def _get_model() -> str:
-    from app.config import settings
-    return settings.openrouter_model

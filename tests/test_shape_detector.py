@@ -93,3 +93,60 @@ def test_shape_result_dataclass():
     assert hasattr(s, "bbox_px")
     assert hasattr(s, "confidence")
     assert hasattr(s, "crop")
+
+
+def test_nested_shape_detected():
+    # Solid outer square with a "room" cut out (white hole), and a separate small
+    # symbol (circle) sitting inside that hole, not touching the outer square.
+    # RETR_EXTERNAL used to see one connected blob and drop the inner circle entirely.
+    img = make_canvas()
+    cv2.rectangle(img, (30, 30), (270, 270), (0, 0, 0), -1)
+    cv2.rectangle(img, (70, 70), (230, 230), (255, 255, 255), -1)
+    cv2.circle(img, (150, 150), 30, (0, 0, 0), -1)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    # Both the outer square and the nested circle must be present now.
+    assert len(shapes) >= 2
+    inner = [s for s in shapes if s.bbox_px["w"] < 100 and s.bbox_px["h"] < 100]
+    assert len(inner) >= 1
+    assert any(s.shape_type == "circle" for s in inner)
+
+
+def test_hollow_stroke_not_duplicated():
+    # A rectangle drawn as an outline (e.g. a wall drawn as two parallel lines) gives
+    # an outer contour and an inner "hole" contour of the same stroke. We should keep
+    # only one shape for it, not double-report outside+inside edges.
+    img = make_canvas()
+    cv2.rectangle(img, (30, 30), (270, 270), (0, 0, 0), 6)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    assert len(shapes) == 1
+
+
+def test_thin_line_classified():
+    img = make_canvas()
+    cv2.line(img, (20, 150), (280, 150), (0, 0, 0), 2)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    assert len(shapes) == 1
+    assert shapes[0].shape_type == "line"
+
+
+def test_diagonal_line_classified():
+    img = make_canvas()
+    cv2.line(img, (20, 20), (280, 280), (0, 0, 0), 2)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    assert len(shapes) == 1
+    assert shapes[0].shape_type == "line"
+
+
+def test_residual_ink_produces_complex_shape():
+    # A cluster of small strokes, each individually below the noise floor, but
+    # together clearly meaningful ink (e.g. hatching or a broken/dashed leader).
+    # None of them survives as its own contour, so they must come back as one
+    # "complex" catch-all shape rather than vanishing.
+    img = make_canvas()
+    for i in range(6):
+        x = 40 + i * 8
+        cv2.rectangle(img, (x, 100), (x + 3, 103), (0, 0, 0), -1)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    complex_shapes = [s for s in shapes if s.shape_type == "complex"]
+    assert len(complex_shapes) >= 1
+    assert complex_shapes[0].crop is not None

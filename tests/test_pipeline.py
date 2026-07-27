@@ -3,6 +3,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 from pipeline import process_image, PipelineResult
 
+NOT_ATTEMPTED = {"state": "not_attempted", "reason": "no_flagged_words", "model": None}
 
 FAKE_OCR_WORD = MagicMock(
     text="entrance", confidence=0.91,
@@ -11,7 +12,7 @@ FAKE_OCR_WORD = MagicMock(
 )
 
 
-@patch("pipeline.apply_corrections", return_value=[])
+@patch("pipeline.apply_corrections", return_value=([], NOT_ATTEMPTED))
 @patch("pipeline.detect_shapes", return_value=[])
 @patch("pipeline.run_ocr", return_value=[FAKE_OCR_WORD])
 @patch("pipeline.segment_layout", return_value=[])
@@ -26,7 +27,7 @@ def test_process_image_returns_pipeline_result(
     assert isinstance(result.sidecar, dict)
 
 
-@patch("pipeline.apply_corrections", return_value=[])
+@patch("pipeline.apply_corrections", return_value=([], NOT_ATTEMPTED))
 @patch("pipeline.detect_shapes", return_value=[])
 @patch("pipeline.run_ocr", return_value=[FAKE_OCR_WORD])
 @patch("pipeline.segment_layout", return_value=[])
@@ -40,7 +41,7 @@ def test_process_image_sidecar_page_dimensions(
     assert result.sidecar["page_dimensions"]["height_px"] == 400
 
 
-@patch("pipeline.apply_corrections", return_value=[])
+@patch("pipeline.apply_corrections", return_value=([], NOT_ATTEMPTED))
 @patch("pipeline.detect_shapes", return_value=[])
 @patch("pipeline.run_ocr", return_value=[])
 @patch("pipeline.segment_layout", return_value=[])

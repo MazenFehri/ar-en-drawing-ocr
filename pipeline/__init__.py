@@ -59,7 +59,9 @@ def process_image(
 
     # Stage 6: LLM correction for flagged words
     _, img_encoded = cv2.imencode(".jpg", preprocessed)
-    elements = apply_corrections(elements, img_encoded.tobytes(), confidence_threshold=threshold)
+    elements, llm_status = apply_corrections(
+        elements, img_encoded.tobytes(), confidence_threshold=threshold,
+    )
 
     # Build crop map: shape_{j:03d} -> crop ndarray, for complex shapes
     crop_images: dict[str, np.ndarray] = {}
@@ -68,20 +70,27 @@ def process_image(
             crop_images[f"shape_{j:03d}"] = shape.crop
 
     # Stage 6b: name the complex shapes, so the sidecar says "door swing" not "unknown"
+    shape_status = {"state": "not_attempted", "reason": "no_shapes_to_label", "model": None}
     if want_labels and crop_images:
-        elements = label_complex_shapes(
+        elements, shape_status = label_complex_shapes(
             elements,
             {eid: ndarray_to_png_bytes(crop) for eid, crop in crop_images.items()},
         )
 
-    # Stage 7: Word assembly
-    docx_bytes = assemble_document(elements, crop_images=crop_images)
+    # Stage 7: Word assembly. Pass the *original* aspect ratio so the page is
+    # letterboxed to match the source — bboxes are relative fractions, and mapping
+    # x by page width and y by page height independently stretches the drawing.
+    docx_bytes = assemble_document(
+        elements, crop_images=crop_images, page_aspect=orig_w / orig_h,
+    )
 
     # Stage 8: JSON sidecar
     elapsed_ms = int((time.time() - start) * 1000)
     sidecar = build_sidecar(
         elements, orig_w, orig_h, elapsed_ms,
         quality_score=detect_quality(preprocessed),
+        llm_status=llm_status,
+        shape_label_status=shape_status,
     )
 
     return PipelineResult(docx_bytes=docx_bytes, sidecar=sidecar)

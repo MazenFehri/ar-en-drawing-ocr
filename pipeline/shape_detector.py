@@ -5,6 +5,13 @@ import cv2
 import numpy as np
 
 MIN_AREA_PX = 400  # Ignore contours smaller than 20×20 px
+MIN_DIAGONAL_PX = 60  # ...unless the bbox diagonal alone says it's a real (thin) stroke
+LINE_ASPECT_RATIO = 8.0  # minAreaRect long/short side above this => "line"
+LINE_MAX_THICKNESS_PX = 12  # ...and the short side must actually be thin
+
+RESIDUAL_DILATE_PX = 9  # merge nearby ink fragments into one blob before componentizing
+RESIDUAL_MIN_AREA_PX = 150  # noise floor for residual (unclassified) ink blobs
+RESIDUAL_MAX_SHAPES = 40  # hard cap so a noisy scan can't spam hundreds of crops
 
 
 @dataclass
@@ -19,24 +26,48 @@ def detect_shapes(image: np.ndarray, text_bboxes_px: list[dict]) -> list[ShapeRe
     """Detect non-text shapes in an image.
 
     text_bboxes_px: list of {x, y, w, h} dicts in pixel coords — these regions are masked.
-    Returns list of ShapeResult, one per detected contour.
+    Returns list of ShapeResult, one per detected contour, plus a handful of
+    "complex" catch-all boxes for any leftover ink that isn't text or a classified shape.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
-    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    # Otsu instead of a fixed 200 cutoff: architectural scans are mostly bimodal
+    # (dark ink on a light page), and Otsu picks the split point automatically instead
+    # of assuming a clean white background. Cheaper and more robust than adaptive
+    # thresholding for this content; doesn't handle uneven lighting/shadows, but that's
+    # not the failure mode we're fixing here.
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     # Mask text regions so OCR text regions don't appear as shapes
     for tb in text_bboxes_px:
         x, y, w, h = int(tb["x"]), int(tb["y"]), int(tb["w"]), int(tb["h"])
         cv2.rectangle(binary, (x, y), (x + w, y + h), 0, -1)
 
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # ponytail: RETR_CCOMP (not RETR_EXTERNAL) so interior content (inner walls, doors,
+    # furniture symbols) inside an outer outline is no longer discarded — that was the
+    # critical bug. RETR_CCOMP gives a 2-level hierarchy (outer boundaries / holes) which
+    # lets us drop the "hole" contour of a stroke drawn as two parallel lines (e.g. a wall)
+    # instead of double-reporting outside+inside edges of the same stroke. Ceiling: this
+    # only strips exact holes, not visually-duplicate contours from other causes (e.g.
+    # anti-aliasing halos); if that shows up on real scans, dedupe by IoU of bbox instead.
+    contours, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    hierarchy = hierarchy[0] if hierarchy is not None else []
 
     results = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < MIN_AREA_PX:
+    claimed_mask = np.zeros(binary.shape, dtype=np.uint8)
+    for idx, cnt in enumerate(contours):
+        parent = hierarchy[idx][3] if len(hierarchy) else -1
+        if parent != -1 and _is_hole_of_parent(cnt, contours[parent]):
+            # This is the inner edge of a stroke whose outer edge we already keep — skip it.
             continue
+
+        area = cv2.contourArea(cnt)
         x, y, w, h = cv2.boundingRect(cnt)
+        diagonal = math.hypot(w, h)
+        if area < MIN_AREA_PX and diagonal < MIN_DIAGONAL_PX:
+            # Area alone punishes thin strokes (a 2px x 150px dimension line has area
+            # ~300 but is clearly real ink); accept on diagonal/arc-length as a fallback.
+            continue
+
         shape_type, confidence = _classify(cnt)
         crop = image[y:y + h, x:x + w].copy() if shape_type == "complex" else None
         results.append(ShapeResult(
@@ -45,10 +76,34 @@ def detect_shapes(image: np.ndarray, text_bboxes_px: list[dict]) -> list[ShapeRe
             confidence=confidence,
             crop=crop,
         ))
+        cv2.drawContours(claimed_mask, [cnt], -1, 255, thickness=cv2.FILLED)
+
+    results.extend(_residual_shapes(image, binary, claimed_mask))
     return results
 
 
+def _is_hole_of_parent(cnt, parent_cnt) -> bool:
+    """True if cnt's bbox is nearly identical to its parent's — i.e. it's the inner
+    edge of the same drawn stroke (double line), not genuinely nested content."""
+    x, y, w, h = cv2.boundingRect(cnt)
+    px, py, pw, ph = cv2.boundingRect(parent_cnt)
+    if pw == 0 or ph == 0:
+        return False
+    # "Nearly identical" bbox on all four edges (within 15% of parent size)
+    tol_w, tol_h = pw * 0.15, ph * 0.15
+    return (
+        abs(x - px) <= tol_w and abs(y - py) <= tol_h and
+        abs((x + w) - (px + pw)) <= tol_w and abs((y + h) - (py + ph)) <= tol_h
+    )
+
+
 def _classify(contour) -> tuple[str, float]:
+    rect = cv2.minAreaRect(contour)
+    (rw, rh) = rect[1]
+    long_side, short_side = max(rw, rh), min(rw, rh)
+    if short_side > 0 and long_side / short_side >= LINE_ASPECT_RATIO and short_side <= LINE_MAX_THICKNESS_PX:
+        return "line", 0.9
+
     peri = cv2.arcLength(contour, True)
     approx = cv2.approxPolyDP(contour, 0.04 * peri, True)
     vertices = len(approx)
@@ -99,3 +154,50 @@ def _solidity(contour) -> float:
     if hull_area == 0:
         return 0.0
     return cv2.contourArea(contour) / hull_area
+
+
+def _residual_shapes(image: np.ndarray, binary: np.ndarray, claimed_mask: np.ndarray) -> list[ShapeResult]:
+    """Catch-all for ink that's neither OCR text nor a contour we classified above.
+
+    This is the fix for "drawings silently vanish": dilate whatever's left, group it
+    into connected components, and emit each as a "complex" shape with its crop so the
+    word assembler embeds it as an image at the right spot, even though we can't name it.
+    """
+    residual = cv2.bitwise_and(binary, cv2.bitwise_not(claimed_mask))
+    if not np.any(residual):
+        return []
+
+    # ponytail: fixed 9px dilation kernel merges nearby fragments (e.g. a dashed line's
+    # dashes, or a symbol's disjoint strokes) into one bbox. Ceiling: a hand-picked
+    # constant that doesn't scale with image resolution; upgrade path is to size the
+    # kernel off image DPI/dimensions if this misses on very high-res scans.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (RESIDUAL_DILATE_PX, RESIDUAL_DILATE_PX))
+    dilated = cv2.dilate(residual, kernel)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dilated, connectivity=8)
+
+    boxes = []
+    for label in range(1, num_labels):  # label 0 is background
+        area = stats[label, cv2.CC_STAT_AREA]
+        if area < RESIDUAL_MIN_AREA_PX:
+            continue
+        x = stats[label, cv2.CC_STAT_LEFT]
+        y = stats[label, cv2.CC_STAT_TOP]
+        w = stats[label, cv2.CC_STAT_WIDTH]
+        h = stats[label, cv2.CC_STAT_HEIGHT]
+        boxes.append((area, x, y, w, h))
+
+    # Cap count: keep the biggest blobs first so a noisy scan can't flood the doc.
+    boxes.sort(key=lambda b: b[0], reverse=True)
+    boxes = boxes[:RESIDUAL_MAX_SHAPES]
+
+    results = []
+    for area, x, y, w, h in boxes:
+        crop = image[y:y + h, x:x + w].copy()
+        results.append(ShapeResult(
+            shape_type="complex",
+            bbox_px={"x": x, "y": y, "w": w, "h": h},
+            confidence=0.5,
+            crop=crop,
+        ))
+    return results

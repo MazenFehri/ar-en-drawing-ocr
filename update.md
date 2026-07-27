@@ -79,13 +79,44 @@ on its free tier. Everything runs on CPU — no special hardware needed.
 
 ---
 
+## Second round — what the first real document exposed
+
+A genuine Arabic document (a university registration table, 540×1200) was processed.
+It found 74 text elements and the Arabic came out correctly readable, which confirms
+the direction-of-text fix holds outside our own test image. It also exposed three
+faults that the synthetic drawing could never have shown, all now fixed.
+
+- **Everything was in the wrong place.** Positions were being stretched to fill an A4
+  page regardless of the shape of the original — this document was distorted by 44%,
+  and the error grew toward the bottom of the page. The page now matches the
+  proportions of whatever is fed in. Measured error afterwards: **0.001%**.
+- **Most of the drawing was being thrown away.** Only the outermost outline of each
+  shape was kept, so everything drawn *inside* a room or a table was discarded before
+  it ever reached the document. On our test drawing this went from 11 elements
+  captured to 30. Anything still unrecognised is now cut out of the original image and
+  pasted in at the right position, so nothing on the page is silently lost.
+- **We could not tell whether the AI reviewer had run.** "0 corrections" looked
+  identical whether the model had checked every word and approved it, or had never
+  been reached at all. The result now says which, and why.
+
+We also found the AI reviewer, when it does answer, sometimes returns blank
+corrections — which would have silently erased correct text from the document. That is
+now rejected rather than applied.
+
 ## Open items
 
-- **No real drawing tested yet.** Everything above used a drawing we generated
-  ourselves — clean, printed, perfectly straight. Real scans are skewed, noisy,
-  handwritten. **Getting 5–10 real drawings is the most valuable next step.**
+- **One real document is not enough.** The document tested was a printed table, not an
+  architectural drawing. **Getting 5–10 real drawings is still the most valuable next
+  step.**
+- **The free AI model is not good enough at this task.** Given a full page and asked
+  about a few small words, it either echoed them back unchanged or returned blanks. It
+  is not being rate-limited — it simply cannot locate a tiny word in a large image. The
+  fix is either a paid model or sending it a close-up of each word rather than the whole
+  page.
 - **Free AI tier is not production-ready.** It rate-limited us mid-testing and forced
-  a model switch. A paid key or a locally hosted model is needed before real use.
+  a model switch. It now retries, falls back through a list of alternative models, and
+  gives up after 60 seconds rather than stalling a request. A paid key is still needed
+  before real use.
 - **Feedback loop half-built.** User corrections are saved to the database as designed,
   but not yet fed back to improve future results.
 - **Deployment target undecided.** Whether the host has a graphics card changes several
@@ -101,4 +132,4 @@ on its free tier. Everything runs on CPU — no special hardware needed.
 4. Connect the correction feedback loop.
 5. Move off the free AI tier.
 
-78 automated tests, all passing.
+109 automated tests, all passing.

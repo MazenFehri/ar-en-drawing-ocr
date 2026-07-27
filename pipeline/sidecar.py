@@ -7,6 +7,8 @@ def build_sidecar(
     image_height: int,
     processing_time_ms: int,
     quality_score: float | None = None,
+    llm_status: dict | None = None,
+    shape_label_status: dict | None = None,
 ) -> dict:
     serialized = [_serialize(e) for e in elements]
     text_count = sum(1 for e in elements if isinstance(e, TextElement))
@@ -29,6 +31,11 @@ def build_sidecar(
             # Laplacian sharpness in [0,1]. Low values mean the scan was blurry and
             # the confidences below should be read with that in mind.
             "quality_score": quality_score,
+            # Without these, "llm_corrections: 0" is ambiguous: it reads the same
+            # whether the model confirmed every word or the provider was down.
+            # {"state": not_attempted|success|failed, "reason": str|None, "model": str|None}
+            "llm_status": llm_status,
+            "shape_label_status": shape_label_status,
         },
     }
 

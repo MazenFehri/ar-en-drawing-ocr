@@ -6,15 +6,23 @@ from typing import Iterator, Optional
 from lxml import etree
 import numpy as np
 from docx import Document
+from docx.enum.section import WD_ORIENT
 from models.elements import Element, TextElement, SimpleShapeElement, ComplexShapeElement
 from utils.image_utils import ndarray_to_png_bytes
 
-# A4 page geometry in EMU (914400 EMU = 1 inch)
+# A4 page geometry in EMU (914400 EMU = 1 inch), portrait orientation
 _PAGE_W = 7_559_670
 _PAGE_H = 10_692_720
 _MARGIN = 914_400
 _USE_W = _PAGE_W - 2 * _MARGIN
 _USE_H = _PAGE_H - 2 * _MARGIN
+
+# Minimum stroke width so a degenerate (zero-area) element is still visible
+_MIN_VISIBLE_EMU = 91_440  # 0.1 inch
+# ponytail: floor for a genuinely thin axis (a line) so we don't force it
+# square; ceiling is "1 EMU is effectively invisible" — if renders show
+# invisible hairlines, revisit with a real min-stroke-width heuristic.
+_DEGENERATE_FLOOR_EMU = 1
 
 # DrawingML preset geometry names for each simple shape type
 _WORD_SHAPE = {
@@ -29,11 +37,19 @@ _WORD_SHAPE = {
 _HIGHLIGHT_MAP = {"yellow": "yellow", "red": "red"}
 
 
-def assemble_document(elements: list[Element], crop_images: dict[str, np.ndarray]) -> bytes:
+def assemble_document(
+    elements: list[Element],
+    crop_images: dict[str, np.ndarray],
+    page_aspect: Optional[float] = None,
+) -> bytes:
     """Assemble a Word document with absolutely positioned elements.
 
     elements: list of TextElement, SimpleShapeElement, ComplexShapeElement
     crop_images: mapping of element id -> numpy BGR image (for ComplexShapeElement)
+    page_aspect: source image width / height. When given, the drawing area is
+        letterboxed to this aspect ratio (and the page flips to landscape if
+        the source is wider than tall) so shapes and bboxes aren't stretched.
+        When None, keeps the legacy full-page stretch mapping unchanged.
     Returns: .docx file as bytes
     """
     _counter = itertools.count(1)
@@ -42,11 +58,13 @@ def assemble_document(elements: list[Element], crop_images: dict[str, np.ndarray
     for p in list(doc.paragraphs):
         p._element.getparent().remove(p._element)
 
+    geom = _page_geometry(doc, page_aspect)
+
     para = doc.add_paragraph()
     run = para.add_run()
 
     for el in elements:
-        left, top, w, h = _emu_coords(el.bbox)
+        left, top, w, h = _emu_coords(el.bbox, geom)
         xml_str = None
 
         if isinstance(el, TextElement):
@@ -73,11 +91,60 @@ def assemble_document(elements: list[Element], crop_images: dict[str, np.ndarray
     return buf.getvalue()
 
 
-def _emu_coords(bbox) -> tuple[int, int, int, int]:
-    left = _MARGIN + int(bbox.x * _USE_W)
-    top = _MARGIN + int(bbox.y * _USE_H)
-    width = max(int(bbox.w * _USE_W), 91_440)   # min 0.1 inch
-    height = max(int(bbox.h * _USE_H), 91_440)
+def _page_geometry(doc: Document, page_aspect: Optional[float]) -> tuple[int, int, int, int]:
+    """Return (box_x, box_y, box_w, box_h): the EMU rect elements map into.
+
+    bbox coordinates are fractions of the source image, so the rect the
+    fractions get multiplied into must itself have the source's aspect
+    ratio, or shapes stretch (bug: circles rendered as ellipses).
+
+    page_aspect is source width / height. None keeps the legacy behaviour
+    (full A4-portrait usable area, no letterboxing) so old callers/tests
+    are unaffected.
+    """
+    if page_aspect is None:
+        return _MARGIN, _MARGIN, _USE_W, _USE_H
+
+    page_w, page_h = _PAGE_W, _PAGE_H
+    landscape = page_aspect > 1
+    if landscape:
+        page_w, page_h = _PAGE_H, _PAGE_W  # swap: landscape A4
+
+    section = doc.sections[0]
+    section.page_width = page_w
+    section.page_height = page_h
+    section.orientation = WD_ORIENT.LANDSCAPE if landscape else WD_ORIENT.PORTRAIT
+
+    use_w = page_w - 2 * _MARGIN
+    use_h = page_h - 2 * _MARGIN
+
+    # Letterbox: fit the source aspect ratio inside the usable area, centred.
+    box_w = use_w
+    box_h = int(box_w / page_aspect)
+    if box_h > use_h:
+        box_h = use_h
+        box_w = int(box_h * page_aspect)
+
+    box_x = _MARGIN + (use_w - box_w) // 2
+    box_y = _MARGIN + (use_h - box_h) // 2
+    return box_x, box_y, box_w, box_h
+
+
+def _emu_coords(bbox, geom: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    box_x, box_y, box_w, box_h = geom
+    left = box_x + int(bbox.x * box_w)
+    top = box_y + int(bbox.y * box_h)
+    width = int(bbox.w * box_w)
+    height = int(bbox.h * box_h)
+    if width < _DEGENERATE_FLOOR_EMU and height < _DEGENERATE_FLOOR_EMU:
+        # Both axes collapsed (a "point") - inflate to a visible minimum.
+        # A shape that's only thin on ONE axis (e.g. a horizontal line) must
+        # keep that thin axis, or it renders as a fat box instead of a line.
+        width = max(width, _MIN_VISIBLE_EMU)
+        height = max(height, _MIN_VISIBLE_EMU)
+    else:
+        width = max(width, _DEGENERATE_FLOOR_EMU)
+        height = max(height, _DEGENERATE_FLOOR_EMU)
     return left, top, width, height
 
 
@@ -155,6 +222,10 @@ def _shape_xml(prst: str, left: int, top: int, cx: int, cy: int, _counter: Itera
         '<wps:spPr>'
         f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
         f'<a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>'
+        # Architectural line art: outline only, no default Word blue fill.
+        # noFill/ln must come right after prstGeom or Word refuses the file.
+        '<a:noFill/>'
+        '<a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>'
         '</wps:spPr>'
         '<wps:bodyPr/>'
         '</wps:wsp>'
