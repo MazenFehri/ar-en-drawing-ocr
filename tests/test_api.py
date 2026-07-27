@@ -1,5 +1,8 @@
 import base64
 import io
+import logging
+import threading
+import time
 import numpy as np
 import pytest
 import cv2
@@ -136,3 +139,123 @@ def test_process_rejects_oversized_upload():
         files={"image": ("huge.jpg", io.BytesIO(huge), "image/jpeg")}
     )
     assert resp.status_code == 413
+
+
+@patch("app.main.cv2.imdecode")
+def test_process_rejects_decompression_bomb(mock_imdecode):
+    """A small encoded file can still decode into a huge in-memory bitmap
+    (PNG/TIFF dimensions aren't bounded by the encoded byte count). Fake a
+    decode that reports an enormous shape without actually allocating one."""
+    mock_imdecode.return_value = MagicMock(shape=(20000, 20000, 3))
+    resp = client.post(
+        "/process",
+        files={"image": ("huge.png", io.BytesIO(make_jpeg_bytes()), "image/png")}
+    )
+    assert resp.status_code == 400
+    assert "pixel" in resp.json()["detail"].lower()
+
+
+@patch("app.main.process_image", side_effect=RuntimeError("boom: /secret/internal/path"))
+def test_process_pipeline_failure_returns_generic_500(mock_pipeline):
+    """An unhandled exception anywhere in the pipeline must not reach the
+    caller as a bare 500 with a traceback/exception message in the body."""
+    resp = client.post(
+        "/process",
+        files={"image": ("drawing.jpg", io.BytesIO(make_jpeg_bytes()), "image/jpeg")}
+    )
+    assert resp.status_code == 500
+    assert resp.json() == {"detail": "Image processing failed"}
+    assert "boom" not in resp.text
+    assert "secret" not in resp.text
+
+
+def test_process_restores_log_level_after_pipeline_clobbers_it(caplog):
+    """Regression proxy for a real bug: PaddleOCR's first model load imports
+    paddle.distributed submodules as a side effect, two of which call a
+    paddle-internal get_logger(level, name="root") helper at import time —
+    name="root" resolves to the actual root logger, so this silently
+    overwrites our configured level (INFO) with WARNING, permanently, and
+    every "process done" log after that point simply never fires (confirmed
+    live in the running container: logging.getLogger("app.main").disabled
+    stays False the whole time, only the *level* changes).
+
+    This suite never imports paddleocr, so it cannot reproduce the real
+    trigger. It simulates the observed effect instead: process_image mutates
+    the root logger's level as a side effect, standing in for what the real
+    import does, and asserts app.main's _restore_log_level fix undoes it in
+    time for "process done" to still be logged.
+    """
+    def clobber_then_return(*args, **kwargs):
+        logging.getLogger().setLevel(logging.WARNING)
+        return MOCK_PIPELINE_RESULT
+    with patch("app.main.process_image", side_effect=clobber_then_return):
+        with caplog.at_level(logging.INFO):
+            resp = client.post(
+                "/process",
+                files={"image": ("drawing.jpg", io.BytesIO(make_jpeg_bytes()), "image/jpeg")}
+            )
+    assert resp.status_code == 200
+    messages = [r.message for r in caplog.records if r.name == "app.main"]
+    assert any(m.startswith("process start:") for m in messages)
+    assert any(m.startswith("process done:") for m in messages), (
+        "process done was not logged — the root logger level clobber was not "
+        "undone before the log call"
+    )
+
+
+def test_health_not_blocked_by_slow_process():
+    """process_image is sync/CPU-bound and must run off the event loop, so
+    /health (and any other request) stays responsive while /process is busy.
+    Regression test for the event-loop-blocking bug: before the fix, /health
+    had to wait for the full duration of the concurrent /process call."""
+    SLEEP_S = 0.5
+
+    def slow_process(*a, **kw):
+        time.sleep(SLEEP_S)
+        return MOCK_PIPELINE_RESULT
+
+    outcome = {}
+
+    def call_process():
+        with patch("app.main.process_image", side_effect=slow_process):
+            outcome["process_resp"] = client.post(
+                "/process",
+                files={"image": ("drawing.jpg", io.BytesIO(make_jpeg_bytes()), "image/jpeg")}
+            )
+
+    def call_health():
+        time.sleep(SLEEP_S / 5)  # let /process start first
+        t0 = time.time()
+        outcome["health_resp"] = client.get("/health")
+        outcome["health_elapsed"] = time.time() - t0
+
+    t1 = threading.Thread(target=call_process)
+    t2 = threading.Thread(target=call_health)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert outcome["process_resp"].status_code == 200
+    assert outcome["health_resp"].status_code == 200
+    # Generous bound: /health should return almost immediately, well short of
+    # the remaining ~0.4s of the concurrent /process sleep.
+    assert outcome["health_elapsed"] < SLEEP_S * 0.6
+
+
+@patch("app.main.ensure_table", side_effect=RuntimeError("db unreachable"))
+def test_startup_survives_db_outage(mock_ensure_table):
+    """The DB is only needed for /feedback, not OCR — a Postgres outage at
+    boot must not prevent the app (and therefore /process) from starting."""
+    with TestClient(app) as c:
+        resp = c.get("/health")
+        assert resp.status_code == 200
+
+
+@patch("app.main.store_corrections", side_effect=OSError("connection refused"))
+def test_feedback_returns_503_when_db_unavailable(mock_store):
+    resp = client.post(
+        "/feedback",
+        json={"document_id": "doc-1", "corrections": [{"element_id": "e1", "user_final": "x"}]},
+    )
+    assert resp.status_code == 503

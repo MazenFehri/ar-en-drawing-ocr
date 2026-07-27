@@ -1,25 +1,99 @@
+import asyncio
 import base64
-import io
 import json
+import logging
+import time
 import uuid
 import numpy as np
 import cv2
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, field_validator
+from starlette.concurrency import run_in_threadpool
 from typing import List
 from pipeline import process_image
 from db.corrections import store_corrections, ensure_table
+from db.connection import close_pool
+from app.config import settings
 from contextlib import asynccontextmanager
+
+# settings.log_level existed but nothing ever applied it — INFO-level logs
+# (including the retry/backoff logging already in pipeline/llm_corrector.py)
+# were silently dropped by the logging module's WARNING-level default. This is
+# the one place the whole process's logging gets configured.
+logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+
+def _restore_log_level():
+    """Undo a logging clobber that PaddleOCR's first model load causes as a side effect.
+
+    Confirmed live (traced logging.Logger.setLevel calls in the running container,
+    since a bare `import paddle` reliably SIGABRTs/SIGSEGVs in a throwaway process
+    on this box): loading either model — PPStructure via pipeline/layout.py or
+    PaddleOCR via pipeline/ocr.py — imports pipeline/_paddle_patch.py, which does
+    `import paddle.inference`, which transitively imports paddle.distributed
+    submodules. Two of those (paddle/distributed/utils/launch_utils.py and
+    paddle/distributed/fleet/meta_parallel/sharding/group_sharded_stage2.py) call
+    a paddle-internal `get_logger(level, name="root")` helper at module import
+    time. `name="root"` is the special string logging.getLogger() resolves to the
+    actual root logger, and that helper unconditionally calls .setLevel() on
+    whatever it gets — so this one-time import silently overwrites our
+    basicConfig level (INFO) with WARNING, permanently, the first time any
+    /process request loads a model. logger.disabled is never touched — only the
+    level is — which is why "process done" (INFO) vanishes forever after the
+    first request while "process failed" (logged at ERROR) would not have.
+    ponytail: reasserting after every pipeline call rather than patching paddle's
+    import is the smallest fix that's still correct — the clobber only happens
+    once (Python caches the import), so this only ever has to win the race once,
+    and it's cheap enough (one setLevel call) to just always do it. Upgrade path
+    if paddle ever also flips .disabled: reset that here too.
+    """
+    logging.getLogger().setLevel(settings.log_level)
 
 
 @asynccontextmanager
 async def lifespan(app):
-    await ensure_table()
+    # The DB is only needed for the /feedback correction loop, not for OCR. If
+    # Postgres is down or misconfigured, ensure_table() raises and (proven:
+    # asyncpg.exceptions.InvalidPasswordError against this repo's own
+    # docker-compose credentials) that used to take startup down with it,
+    # taking /process down too. Log and continue instead — /feedback will
+    # raise its own error per-request (via get_pool()) until the DB recovers.
+    try:
+        await ensure_table()
+    except Exception:
+        logger.exception("DB unavailable at startup; /process will still work, /feedback will not until this is fixed")
+    if not settings.openrouter_api_key:
+        # LLM correction degrades to "not_attempted" per-request already (see
+        # pipeline/llm_corrector.py), but that's easy to miss buried in a
+        # sidecar. Say it once, loudly, at boot.
+        logger.warning("OPENROUTER_API_KEY is not set; LLM correction and shape labelling are disabled")
     yield
+    await close_pool()
 
 
 app = FastAPI(title="Arabic Architectural OCR API", version="1.0.0", lifespan=lifespan)
+
+# process_image is synchronous, CPU-bound (~3s) and can call out to an LLM for
+# up to another ~60s (see TOTAL_LLM_BUDGET_SECONDS in llm_corrector.py). Run it
+# in FastAPI's threadpool (run_in_threadpool below) so it doesn't block the
+# event loop — otherwise nothing else, including /health, gets served while an
+# image is processing (proven: see scratchpad proof — /health took 2.72s to
+# answer during a 3.02s /process call before this fix).
+#
+# PaddleOCR instances are cached per-language in pipeline.ocr._ocr_instances
+# and reused across calls; Paddle Inference predictors are documented as not
+# thread-safe for concurrent inference on one shared instance. Offloading to
+# the threadpool alone would let concurrent /process requests hit the same
+# predictor from different threads. This semaphore caps that at 1 concurrent
+# pipeline run, trading away parallelism the shared model can't safely give
+# us anyway.
+# ponytail: bound is 1 concurrent /process at a time; extra requests queue
+# rather than run in parallel. Upgrade path if throughput becomes the
+# bottleneck: one PaddleOCR instance per worker thread (~100MB extra per
+# slot) or predictor.clone(), then raise this to match.
+_process_semaphore = asyncio.Semaphore(1)
 
 
 @app.get("/health")
@@ -46,6 +120,17 @@ def _is_webp(raw: bytes) -> bool:
     """
     return len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
 
+
+# The 25 MB cap above bounds the *encoded* upload, not the decoded array —
+# PNG/TIFF can expand a small file into a huge in-memory bitmap ("decompression
+# bomb"), e.g. a few KB of PNG declaring 65535x65535 decodes to ~12GB as a BGR
+# array. Reject decoded images bigger than this many pixels before they reach
+# the (much heavier) pipeline. 200 MP clears a real large-format scan (A0 at
+# 300 DPI is ~139 MP) with headroom, while still bounding a hostile decode to
+# ~600 MB.
+# ponytail: the number is a guess at "clearly hostile ceiling", not a measured
+# one. Raise it if legitimate large-format scans start getting rejected.
+_MAX_DECODED_PIXELS = 200_000_000
 
 _LANGUAGE_HINTS = {"ar+en", "ar", "en"}
 
@@ -82,15 +167,46 @@ async def process(
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(status_code=400, detail="Could not decode image")
-
-    result = process_image(
-        img,
-        confidence_threshold=confidence_threshold,
-        language_hint=language_hint,
-        label_shapes=label_shapes,
-    )
+    if img.shape[0] * img.shape[1] > _MAX_DECODED_PIXELS:
+        raise HTTPException(status_code=400, detail="Decoded image exceeds the maximum allowed pixel count")
 
     document_id = str(uuid.uuid4())
+    logger.info(
+        "process start: document_id=%s filename=%s content_type=%s size_bytes=%d dims=%dx%d",
+        document_id, image.filename, image.content_type, len(raw), img.shape[1], img.shape[0],
+    )
+    t0 = time.monotonic()
+    try:
+        # See _process_semaphore above for why this is both threadpool-offloaded
+        # (don't block the event loop) and serialized (PaddleOCR instances
+        # aren't safe for concurrent use).
+        async with _process_semaphore:
+            try:
+                result = await run_in_threadpool(
+                    process_image,
+                    img,
+                    confidence_threshold=confidence_threshold,
+                    language_hint=language_hint,
+                    label_shapes=label_shapes,
+                )
+            finally:
+                # Must run before any log call below — see _restore_log_level's
+                # docstring for why the first model load needs this every time.
+                _restore_log_level()
+    except Exception:
+        # The pipeline is a lot of moving parts (preprocessing, layout, OCR,
+        # shape detection, docx assembly) and previously any exception in any
+        # of them propagated straight to the client as a bare 500 with a
+        # traceback in the body. Log the real thing server-side, tell the
+        # caller only that it failed.
+        logger.exception(
+            "process failed: document_id=%s after %.1fs", document_id, time.monotonic() - t0,
+        )
+        raise HTTPException(status_code=500, detail="Image processing failed") from None
+    logger.info(
+        "process done: document_id=%s elapsed=%.1fs llm_status=%s",
+        document_id, time.monotonic() - t0, result.sidecar["stats"].get("llm_status"),
+    )
 
     if response_format == "docx":
         # The .docx itself, so a browser (or Swagger's "Download file" link) saves a
@@ -134,7 +250,18 @@ class FeedbackRequest(BaseModel):
 
 @app.post("/feedback", status_code=204)
 async def feedback(body: FeedbackRequest):
-    await store_corrections(
-        body.document_id,
-        [c.model_dump() for c in body.corrections],
-    )
+    try:
+        await store_corrections(
+            body.document_id,
+            [c.model_dump() for c in body.corrections],
+        )
+    except Exception:
+        # Same DB-outage scenario as the lifespan startup check above, just
+        # per-request instead of at boot: /feedback is the only thing that
+        # needs Postgres, so this is the one place an outage should surface —
+        # as a clear 503, not an unhandled exception (Starlette's default
+        # handler would already return a generic 500 without leaking
+        # anything, but 503 + a logged reason is more useful to the caller
+        # and to whoever is on call).
+        logger.exception("feedback failed: document_id=%s", body.document_id)
+        raise HTTPException(status_code=503, detail="Could not store corrections") from None
