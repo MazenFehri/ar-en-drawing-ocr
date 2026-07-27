@@ -2,8 +2,8 @@ import cv2
 import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
-from models.elements import TextElement, BBox, LLMCorrection
-from pipeline.llm_corrector import apply_corrections, _build_prompt
+from models.elements import TextElement, BBox, LLMCorrection, ComplexShapeElement
+from pipeline.llm_corrector import apply_corrections, _build_prompt, label_complex_shapes
 
 
 def _fake_page_bytes(w=200, h=200):
@@ -628,3 +628,193 @@ def test_duplicate_word_different_confidence_corrected_independently(mock_client
     assert by_id["t1"].llm_correction.corrected == "entrance hall"
     assert by_id["t1"].llm_correction.certainty == pytest.approx(0.65)
     assert status["state"] == "success"
+
+
+# --- label_complex_shapes: visual dedup of repeated symbol crops -----------
+
+def make_shape_el(id_, x=0.0, y=0.0, w=0.1, h=0.1):
+    return ComplexShapeElement(id=id_, bbox=BBox(x=x, y=y, w=w, h=h))
+
+
+def _shape_png(img: np.ndarray) -> bytes:
+    ok, buf = cv2.imencode(".png", img)
+    assert ok
+    return buf.tobytes()
+
+
+def _door_swing_crop(size=160, dx=0, dy=0):
+    """A door-swing-like symbol: a corner box plus a quarter-arc, drawn with
+    anti-aliasing so a small (dx, dy) shift produces the same kind of 1-2px
+    crop-bound jitter real independently-detected crops of the same symbol
+    would have -- not random pixel noise, which isn't representative of clean
+    vector line art. Sized close to a real symbol crop (see the sample-
+    drawing measurement backing SHAPE_HASH_MAX_HAMMING): at this scale a
+    couple of pixels of jitter is a small fraction of the shape, exactly like
+    the real measurement, whereas a tiny crop would make the same pixel
+    jitter proportionally huge and is not representative."""
+    img = np.full((size, size), 255, dtype=np.uint8)
+    cv2.rectangle(img, (15 + dx, 15 + dy), (size - 15 + dx, size - 15 + dy), 0, 4, lineType=cv2.LINE_AA)
+    cv2.ellipse(img, (15 + dx, 15 + dy), (size - 45, size - 45), 0, 0, 90, 0, 2, lineType=cv2.LINE_AA)
+    return img
+
+
+def _window_crop(size=160):
+    """A visually distinct symbol (a plain rectangle bisected by a line) --
+    same rough aspect ratio as the door swing, but a different pattern, so
+    only the hash (not the aspect-ratio gate) is what must keep it separate."""
+    img = np.full((size, size), 255, dtype=np.uint8)
+    cv2.rectangle(img, (15, 15), (size - 15, size - 15), 0, 4, lineType=cv2.LINE_AA)
+    cv2.line(img, (15, size // 2), (size - 15, size // 2), 0, 2, lineType=cv2.LINE_AA)
+    return img
+
+
+def _triangle_crop(size=160):
+    img = np.full((size, size), 255, dtype=np.uint8)
+    pts = np.array([[size // 2, 15], [15, size - 15], [size - 15, size - 15]], dtype=np.int32)
+    cv2.polylines(img, [pts], True, 0, 4, lineType=cv2.LINE_AA)
+    return img
+
+
+def _shape_content_image_count(mock_client) -> int:
+    _, kwargs = mock_client.chat.completions.create.call_args
+    return sum(1 for c in kwargs["messages"][1]["content"] if c["type"] == "image_url")
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_identical_crops_send_one_image_but_label_every_element(mock_client_fn):
+    """The core optimisation: N crops of the same symbol must produce exactly
+    one image in the outgoing request, but every one of the N elements must
+    still come back labelled."""
+    crop = _door_swing_crop()
+    png = _shape_png(crop)
+    elements = [make_shape_el(f"s{i}") for i in range(5)]
+    crop_bytes = {el.id: png for el in elements}  # literally identical bytes
+
+    resp = '[{"index": 0, "label": "door swing", "certainty": 0.92}]'
+    mock_client = _mock_client(resp)
+    mock_client_fn.return_value = mock_client
+
+    result, status = label_complex_shapes(elements, crop_bytes)
+
+    assert mock_client.chat.completions.create.call_count == 1  # one group -> one call
+    assert _shape_content_image_count(mock_client) == 1
+    assert status["state"] == "success"
+    for el in result:
+        assert el.llm_label == "door swing"
+        assert el.llm_label_certainty == pytest.approx(0.92)
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_visually_different_crops_are_not_merged(mock_client_fn):
+    """A door swing and a window must never be collapsed into one label --
+    both get sent, both get their own answer."""
+    elements = [make_shape_el("door"), make_shape_el("window")]
+    crop_bytes = {
+        "door": _shape_png(_door_swing_crop()),
+        "window": _shape_png(_window_crop()),
+    }
+    resp = (
+        '[{"index": 0, "label": "door swing", "certainty": 0.9}, '
+        '{"index": 1, "label": "window", "certainty": 0.85}]'
+    )
+    mock_client = _mock_client(resp)
+    mock_client_fn.return_value = mock_client
+
+    result, status = label_complex_shapes(elements, crop_bytes)
+
+    assert _shape_content_image_count(mock_client) == 2  # not deduped
+    by_id = {e.id: e for e in result}
+    assert by_id["door"].llm_label == "door swing"
+    assert by_id["window"].llm_label == "window"
+    assert status["state"] == "success"
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_near_identical_crop_with_minor_jitter_still_groups(mock_client_fn):
+    """This repo's chosen matching rule is a small Hamming-distance tolerance
+    (SHAPE_HASH_MAX_HAMMING = 3), not pure byte/hash equality -- justified in
+    _group_similar_crops because on real line-art crops a 1-2px difference in
+    crop bounds (the realistic source of variation between two independently
+    detected instances of the same symbol) lands well inside that tolerance
+    while a genuinely different symbol lands far outside it. This test proves
+    that tolerance actually does its job: two crops of the "same" symbol
+    generated with a 1px draw offset (simulating that crop-bound jitter) must
+    still collapse into a single LLM call."""
+    elements = [make_shape_el("a"), make_shape_el("b")]
+    crop_bytes = {
+        "a": _shape_png(_door_swing_crop(dx=0, dy=0)),
+        "b": _shape_png(_door_swing_crop(dx=1, dy=0)),
+    }
+    resp = '[{"index": 0, "label": "door swing", "certainty": 0.9}]'
+    mock_client = _mock_client(resp)
+    mock_client_fn.return_value = mock_client
+
+    result, status = label_complex_shapes(elements, crop_bytes)
+
+    assert _shape_content_image_count(mock_client) == 1  # jitter still grouped
+    by_id = {e.id: e for e in result}
+    assert by_id["a"].llm_label == "door swing"
+    assert by_id["b"].llm_label == "door swing"
+    assert status["state"] == "success"
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_dedup_does_not_change_outcome_when_every_crop_is_unique(mock_client_fn):
+    """No repeats in the input -> dedup is a no-op: same number of images sent
+    as elements, and every element still gets the right label by index."""
+    elements = [make_shape_el("door"), make_shape_el("window"), make_shape_el("triangle")]
+    crop_bytes = {
+        "door": _shape_png(_door_swing_crop()),
+        "window": _shape_png(_window_crop()),
+        "triangle": _shape_png(_triangle_crop()),
+    }
+    resp = (
+        '[{"index": 0, "label": "door swing", "certainty": 0.9}, '
+        '{"index": 1, "label": "window", "certainty": 0.8}, '
+        '{"index": 2, "label": "triangle", "certainty": 0.7}]'
+    )
+    mock_client = _mock_client(resp)
+    mock_client_fn.return_value = mock_client
+
+    result, status = label_complex_shapes(elements, crop_bytes)
+
+    assert _shape_content_image_count(mock_client) == 3
+    by_id = {e.id: e for e in result}
+    assert by_id["door"].llm_label == "door swing"
+    assert by_id["window"].llm_label == "window"
+    assert by_id["triangle"].llm_label == "triangle"
+    assert status["state"] == "success"
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_dedup_group_failure_still_degrades_gracefully_for_every_member(mock_client_fn):
+    """A failed LLM call for a group must leave every member of that group
+    unlabelled and return the original elements, exactly like the
+    non-deduped path -- dedup must not change the failure contract."""
+    from openai import RateLimitError
+    import httpx
+
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(429, request=request, headers={}, json={"error": "rate limited"})
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = RateLimitError(
+        "rate limited", response=response, body={"error": "rate limited"}
+    )
+    mock_client_fn.return_value = mock_client
+
+    elements = [make_shape_el(f"s{i}") for i in range(3)]
+    png = _shape_png(_door_swing_crop())
+    crop_bytes = {el.id: png for el in elements}
+
+    with patch("pipeline.llm_corrector.time.sleep"):
+        result, status = label_complex_shapes(elements, crop_bytes)
+
+    assert status["state"] == "failed"
+    for el in result:
+        assert el.llm_label is None
+        assert el.llm_label_certainty is None

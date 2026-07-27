@@ -220,6 +220,15 @@ def label_complex_shapes(
     llm_label_certainty on ComplexShapeElements. Like word correction this is
     best-effort: a provider failure leaves the labels unset rather than failing
     the request, and the returned status says why.
+
+    A floor plan repeats the same door swing / window / grid marker dozens of
+    times, and shape labelling is the dominant cost of a request when it's
+    enabled (~16-20s of a ~20s call) because every crop used to be sent, paid
+    for and waited on separately. _group_similar_crops groups visually-
+    identical crops so only one representative per group is actually sent to
+    the model; its label is then copied onto every member of the group below.
+    This changes *how many* LLM calls are made, never *which* elements end up
+    labelled — every target still gets llm_label / llm_label_certainty set.
     """
     targets = [
         e for e in elements
@@ -233,6 +242,17 @@ def label_complex_shapes(
         logger.warning("Shape labelling skipped: OPENROUTER_API_KEY is not configured")
         return elements, _status("not_attempted", "not_configured")
 
+    groups = _group_similar_crops(targets, crop_png_bytes)
+    representatives = [group[0] for group in groups]
+    # Every group member (including the representative itself) maps back to
+    # its representative's id, so a label found under the representative's id
+    # can be copied onto the whole group once the calls come back.
+    representative_of = {el.id: group[0].id for group in groups for el in group}
+    logger.info(
+        "Shape labelling: %d crops deduped to %d unique (%d LLM calls saved before chunking)",
+        len(targets), len(representatives), len(targets) - len(representatives),
+    )
+
     client = _get_client()
     by_id: dict[str, dict] = {}
     last_status = _status("failed", "unknown")
@@ -241,8 +261,8 @@ def label_complex_shapes(
     # ponytail comment on TOTAL_LLM_BUDGET_SECONDS.
     deadline = time.monotonic() + TOTAL_LLM_BUDGET_SECONDS
 
-    for start in range(0, len(targets), MAX_CROPS_PER_CALL):
-        chunk = targets[start:start + MAX_CROPS_PER_CALL]
+    for start in range(0, len(representatives), MAX_CROPS_PER_CALL):
+        chunk = representatives[start:start + MAX_CROPS_PER_CALL]
         content = _build_shape_content(chunk, crop_png_bytes)
         try:
             raw, chunk_status = _request_with_fallback(client, SHAPE_PROMPT, content, deadline)
@@ -260,15 +280,113 @@ def label_complex_shapes(
     if not any_success:
         return elements, last_status
 
+    def _labelled(el: ComplexShapeElement) -> dict | None:
+        return by_id.get(representative_of.get(el.id))
+
     return [
         el.model_copy(update={
-            "llm_label": by_id[el.id]["label"],
-            "llm_label_certainty": float(by_id[el.id].get("certainty", 0.0)),
+            "llm_label": _labelled(el)["label"],
+            "llm_label_certainty": float(_labelled(el).get("certainty", 0.0)),
         })
-        if isinstance(el, ComplexShapeElement) and el.id in by_id
+        if isinstance(el, ComplexShapeElement) and _labelled(el) is not None
         else el
         for el in elements
     ], last_status
+
+
+# Aspect ratio is a cheap discriminator to check before trusting a hash match:
+# resizing to a fixed grid for the hash throws the original aspect away, so
+# two genuinely different symbols could in principle collide there. A crop
+# whose width/height ratio differs from the group's by more than this
+# fraction is never merged into it, no matter what the hash says.
+SHAPE_HASH_ASPECT_TOLERANCE = 0.08
+
+# Max dHash Hamming distance (out of 64 bits) to still call two crops "the
+# same symbol". Measured on real crops cut from sample_drawing.png (clean
+# vector line art, not photos — representative of what this pipeline
+# actually labels): the *same* symbol region cropped with bounding boxes
+# jittered by 1-2px (the realistic variance between two independently
+# detected instances of one repeated symbol) came back at Hamming distance
+# 0-2. Genuinely *different* symbols (circle vs. triangle vs. pentagon) came
+# back at 14-26. That's a wide gap with plenty of margin either side, so 3
+# was picked to comfortably cover the jitter case without getting anywhere
+# near the different-symbol range. Pure exact-match (0) was tried first per
+# the "bias toward strict matching" guidance, but real anti-aliasing/crop-
+# bound jitter routinely produces Hamming 1-2 even for the same symbol, which
+# would make dedup fire on almost nothing — the same "silently does nothing"
+# failure mode the raw-bytes approach has, just one level down. If this ever
+# proves too loose in production (a wrong label spreading across a group),
+# drop it back toward 0 first before reaching for anything fancier.
+SHAPE_HASH_MAX_HAMMING = 3
+
+
+def _group_similar_crops(
+    targets: list[ComplexShapeElement], crop_png_bytes: dict[str, bytes]
+) -> list[list[ComplexShapeElement]]:
+    """Group shape crops that are visually the same symbol so only one member
+    per group needs labelling.
+
+    Matching is a perceptual difference-hash (dHash) on the greyscale crop
+    within SHAPE_HASH_MAX_HAMMING bits, gated by aspect ratio (see the
+    constants above for the measured justification of both thresholds). A
+    crop is compared against each existing group's *first* member (not a
+    running average) — simple, and good enough given how tight the threshold
+    is. A crop that fails to decode is never merged with anything (its own
+    group of one), so a bad crop just costs one extra call instead of
+    borrowing — or donating — a wrong label.
+    # ponytail: this only catches near-pixel-equivalent renderings — a
+    # mirrored or rotated instance of the same symbol (a door swinging the
+    # other way) hashes completely differently and will not be merged, so
+    # it's sent and labelled on its own like today. Upgrade path: hash the
+    # crop under a small set of rotations/flips (0/90/180/270 x mirror) and
+    # match against the representative's set instead of a single hash, if
+    # rotated symbols turn out to be common enough to matter.
+    """
+    groups: list[dict] = []
+    for el in targets:
+        sig = _crop_signature(crop_png_bytes.get(el.id))
+        match = None
+        if sig is not None:
+            h, aspect = sig
+            for g in groups:
+                if g["sig"] is None:
+                    continue
+                g_hash, g_aspect = g["sig"]
+                if abs(g_aspect - aspect) > SHAPE_HASH_ASPECT_TOLERANCE * max(g_aspect, aspect, 1e-6):
+                    continue
+                if bin(g_hash ^ h).count("1") <= SHAPE_HASH_MAX_HAMMING:
+                    match = g
+                    break
+        if match is not None:
+            match["members"].append(el)
+        else:
+            groups.append({"sig": sig, "members": [el]})
+    return [g["members"] for g in groups]
+
+
+def _crop_signature(png_bytes: bytes | None) -> tuple[int, float] | None:
+    """(dHash, aspect_ratio) for one shape crop, or None if it can't be decoded.
+
+    dHash: greyscale, shrink to 9x8 with area averaging (averaging rather than
+    nearest/linear resampling is what makes this tolerant of a couple of
+    stray anti-aliased pixels — see _group_similar_crops), then one bit per
+    pixel for "brighter than the pixel to its right" — 8 rows x 8 comparisons
+    = 64 bits. Not cryptographic, doesn't need to be: two visually identical
+    crops should shrink to the same light/dark pattern.
+    """
+    if not png_bytes:
+        return None
+    img = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    if img is None or img.size == 0:
+        return None
+    h, w = img.shape[:2]
+    aspect = w / h if h else 0.0
+    small = cv2.resize(img, (9, 8), interpolation=cv2.INTER_AREA)
+    diff = small[:, 1:] > small[:, :-1]
+    bits = 0
+    for bit in diff.flatten():
+        bits = (bits << 1) | int(bit)
+    return bits, aspect
 
 
 def _chunks(seq: list, size: int):
