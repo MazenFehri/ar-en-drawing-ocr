@@ -100,9 +100,28 @@ pytest
 ### Easiest: interactive Swagger UI
 
 Open <http://localhost:8000/docs> in a browser → **POST /process** → **Try it
-out** → choose an image → **Execute**. The response (with `docx_base64`) appears
-below. No command line needed — recommended on Windows, where PowerShell's `curl`
-is an alias for `Invoke-WebRequest` and does not accept `-X`/`-F` flags.
+out** → choose an image → **Execute**. No command line needed — recommended on
+Windows, where PowerShell's `curl` is an alias for `Invoke-WebRequest` and does
+not accept `-X`/`-F` flags.
+
+**Set `response_format` to `docx`** unless you specifically want the JSON. The
+default `json` returns the document as a base64 string you then have to decode by
+hand; `docx` gives you a file you can open in Word straight from the browser.
+
+### Easier still: one command
+
+```bash
+python try_it.py your_drawing.jpg      # omit the filename to use sample_drawing.png
+```
+
+Writes `output.docx` and `sidecar.json` next to the image and prints every element
+found with its confidence. To watch the LLM reviewer actually run, raise the
+threshold — at the `0.75` default a clean image flags almost nothing:
+
+```bash
+# in try_it.py, or as a -F field on the curl call below
+confidence_threshold=0.99
+```
 
 ### Process an image (curl)
 
@@ -120,6 +139,7 @@ curl -X POST http://localhost:8000/process \
 | `confidence_threshold` | `0.75` | Words below this go to the LLM for correction. Must be 0.0–1.0. |
 | `language_hint` | `ar+en` | One of `ar+en`, `ar`, `en`. Picks the OCR model; `ar+en` also reads Latin and digits. |
 | `label_shapes` | from env | Ask the vision model to name complex shape crops (`llm_label` in the sidecar). |
+| `response_format` | `json` | `docx` returns the Word file itself as a download, with the sidecar stats in the `X-Sidecar-Stats` header. `json` returns the base64 payload below. |
 
 Raising `confidence_threshold` sends more words to the LLM: slower, and on a free
 model it will hit rate limits. `0.75` is the useful default.

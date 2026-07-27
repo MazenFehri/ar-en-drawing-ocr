@@ -9,10 +9,9 @@
 
 You give it a photo or scan of an architectural drawing. It returns a Word document
 with the text, shapes and symbols placed where they were on the original, plus a JSON
-file describing everything found and how confident it was.
-
-The hard part is that these drawings mix Arabic and English — two languages that read
-in opposite directions sharing one page.
+file describing everything found and how confident it was. The hard part is that these
+drawings mix Arabic and English — two languages that read in opposite directions
+sharing one page.
 
 ---
 
@@ -33,6 +32,35 @@ Measured in Docker, on the real pipeline (not shortcuts or mocks):
 
 ---
 
+## How it works
+
+A drawing goes through eight steps, in this order:
+
+1. **Clean up the image.** Large scans are shrunk, tilt is straightened unless it
+   exceeds 15° (that much could be a real roof slope or section line, not a crooked
+   scan), and noise and contrast are corrected.
+2. **Split the page into regions**, using PaddleOCR PP-Structure — separates text
+   areas from drawing areas so each is handled correctly further down the line.
+3. **Read the words**, using PaddleOCR PP-OCRv4's Arabic model — every word is read,
+   each with a confidence score.
+4. **Find the shapes**, using OpenCV. This runs *after* the words, on purpose, so
+   recognised text can be blanked out first and never gets captured twice, once as text
+   and once as a picture. It works by tracing each dark region's outline and measuring
+   its geometry — how round, how many corners, how solid — arithmetic, not AI, so it is
+   instant and predictable. Whatever it cannot identify is still cut out of the original
+   image and carried through as a picture, so nothing on the page is silently dropped.
+5. **Rebuild the layout.** Positions become proportional rather than fixed pixels,
+   words group into lines, each line reads in its own direction (right to left for
+   Arabic), and Arabic converts from the order it is drawn in to the order it is
+   actually stored and read.
+6. **Let an AI double-check the hard parts**, using a vision model via OpenRouter.
+   Two separate, optional passes: unsure words are each shown as an enlarged close-up
+   of just that one word, and unclassified shapes are shown to the AI to name.
+7. **Build the Word document**, using python-docx — every element placed at its exact
+   position, on a page shaped to match the original drawing's proportions.
+8. **Write the results file** — a JSON file listing everything found, with its
+   position, confidence, and whether the AI reviewed it.
+
 ## What we used, and why
 
 | Part | Choice | Why | Trade-off |
@@ -40,7 +68,7 @@ Measured in Docker, on the real pipeline (not shortcuts or mocks):
 | Text recognition | **PaddleOCR** (PP-OCRv4, Arabic model) | Best free Arabic OCR. Runs locally, so no per-page cost and drawings never leave the machine. | Slower than a cloud OCR API, and its Arabic model is a version behind the newest (see Open items). |
 | Shape detection | **OpenCV** contour analysis | Geometry is maths, not AI — it is instant, free and predictable. | Only recognises simple shapes. Anything irregular is cropped as a picture instead. |
 | Layout analysis | **PaddleOCR PP-Structure** | Already in the stack, separates text areas from drawing areas. | Trained on documents, not floor plans, so it is the weakest link. We compensate by also masking the detected words. |
-| Text correction | **Vision LLM via OpenRouter** (currently a free-tier Gemma model) | Double-checks words the OCR is unsure about, by looking at the image. One provider, swappable models. | Free tier rate-limits unpredictably. Treated as optional — if it fails we return the raw OCR text. |
+| Text correction | **Vision LLM via OpenRouter** (currently a free-tier Gemma model) | Double-checks words the OCR is unsure about, now by looking at an enlarged close-up of each individual word rather than the whole page. One provider, swappable models. | Free tier rate-limits unpredictably. Treated as optional — if it fails we return the raw OCR text. |
 | Word output | **python-docx** with positioned text boxes | Puts every element at an exact position, which is what "keep the layout" requires. | Output is a canvas of boxes, not flowing editable paragraphs. |
 | Storage | **PostgreSQL** | Stores user corrections for the feedback loop. | — |
 | Packaging | **Docker Compose** | One command starts the service and its database anywhere. | — |
@@ -57,17 +85,15 @@ The first genuine document we ran (a printed Arabic university registration tabl
 exposed three faults our own test image was never shaped in a way to reveal.
 
 1. **Positions were wrong on every document.** Elements were placed as if every page
-   were the same fixed shape, regardless of the actual shape of the original. The test
-   document was distorted 44%, worse toward the bottom of the page. The page now
-   matches the proportions of whatever is fed in; measured error afterwards: **0.001%**.
-   Separately, the document had also been the wrong paper size all along (US Letter
-   instead of A4), while the positioning maths assumed A4 — that is now consistent.
-2. **Most of the drawing was being thrown away.** Only the outermost outline of each
-   shape was kept, so anything drawn *inside* a room or a table — interior walls,
-   fixtures, furniture — never reached the document. On the test drawing this went
-   from 11 elements captured to 30. Anything still unrecognised is now cut out of the
-   original image and pasted in at the right position, so nothing on the page is
-   silently lost.
+   had the same fixed shape, regardless of the original's actual shape — the test
+   document was distorted 44%, worse toward the bottom. The page now matches whatever
+   shape is fed in (measured error afterwards: **0.001%**). A separate mismatch, where
+   the paper size was assumed to be A4 when it was really US Letter, is also fixed.
+2. **Most of the drawing was being thrown away.** Only each shape's outermost outline
+   was kept, so anything drawn *inside* a room or table — interior walls, fixtures,
+   furniture — never reached the document (11 elements captured became 30 on the test
+   drawing). Anything still unrecognised is now cut from the original image and pasted
+   in at the right position, so nothing on the page is silently lost.
 3. **There was no way to tell whether the AI reviewer had run.** "0 corrections"
    looked identical whether the model had checked every word and approved it, or had
    never been reached at all. The result now says which, and why.
@@ -78,14 +104,11 @@ exposed three faults our own test image was never shaped in a way to reveal.
 
 Our working theory had been that the AI reviewer was being rate-limited. Live testing
 ruled that out: the key was valid, the model responded, and the connection worked.
-The real problem was how we were asking the question. The reviewer was shown the
-*entire page* and asked what a handful of small, low-confidence words said, with no
-indication of where on the page they were. It could not find them, so it simply
-repeated the OCR's original guess back — at maximum confidence, even when that guess
-was wrong.
-
-It now receives a close-up, enlarged photo of each individual word instead of the
-whole page.
+The real problem was how we asked the question — the reviewer was shown the *entire
+page* and asked what a handful of small, low-confidence words said, with no indication
+of where they were, so it simply repeated the OCR's original guess back at maximum
+confidence, even when that guess was wrong. It now receives a close-up, enlarged photo
+of each individual word instead of the whole page.
 
 To test this properly, we designed a check the model could not pass by guessing: each
 word was deliberately mislabelled with a plausible but *unrelated* wrong answer (the
@@ -97,7 +120,7 @@ correctly was to actually read the image.
 | Correctly re-read | 0 out of 5 | 5 out of 5 |
 
 Along the way we also found the reviewer occasionally returns a blank answer instead
-of a word. The old code would have written that blank into the document, silently
+of a word; the old code would have written that blank into the document, silently
 erasing a correct piece of text. Blank answers are now rejected rather than applied.
 
 **Confirmed on the real service.** Running the full pipeline with every word sent for
@@ -130,11 +153,11 @@ We also removed two unused packages found during the same check.
   an architectural drawing. Getting 5–10 real drawings remains the most valuable next
   step.
 - **The free AI tier still rate-limits unpredictably**, and is sometimes simply slow.
-  A paid key is needed before production use. In the meantime the system retries,
-  falls back to alternative models, and enforces a 60-second limit on each of the two
-  AI stages — so a request that uses both and hits the limit on each can take about two
-  minutes at worst before returning the document from the raw OCR text. Testing caught
-  an earlier version of this limit not being enforced at all; it now is.
+  A paid key is needed before production use. Meanwhile the system retries, falls back
+  to alternative models, and caps each of the two AI stages at 60 seconds — so a
+  request that uses both, timing out on each, can take about two minutes at worst
+  before returning the document from raw OCR text. Testing caught an earlier version
+  of this limit not being enforced at all; it now is.
 - **The feedback loop is half-built.** User corrections are saved to the database but
   not yet used to improve future results.
 - **Deployment target still undecided.**
