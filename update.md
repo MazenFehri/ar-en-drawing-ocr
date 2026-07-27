@@ -1,18 +1,35 @@
 # Arabic Architectural OCR — Progress Update
 
-**Date:** 26 July 2026
-**Status:** Working end to end, running in Docker, verified against a test drawing.
+**Date:** 27 July 2026
+**Status:** Working end to end, verified in Docker against the real pipeline. Two rounds of fixes since the last update, both triggered by testing on a genuine document rather than our own test image.
 
 ---
 
 ## What it does
 
 You give it a photo or scan of an architectural drawing. It returns a Word document
-with the text, shapes and symbols placed roughly where they were on the original,
-plus a JSON file describing everything found and how confident it was.
+with the text, shapes and symbols placed where they were on the original, plus a JSON
+file describing everything found and how confident it was.
 
 The hard part is that these drawings mix Arabic and English — two languages that read
 in opposite directions sharing one page.
+
+---
+
+## Verified working
+
+Measured in Docker, on the real pipeline (not shortcuts or mocks):
+
+| Check | Result |
+|---|---|
+| Speed, core pipeline (warm) | 2.8–3.3 seconds |
+| Speed, with symbol naming | ~20 seconds |
+| Speed, with every word double-checked | 25–27 seconds |
+| Word document validity | Valid; every element placed at an exact position |
+| Page shape | Matches the source image correctly (see below) |
+| Elements placed off the page | Zero |
+| Arabic reading order | Correct, on the real OCR path |
+| Automated tests | 117 passing |
 
 ---
 
@@ -20,116 +37,118 @@ in opposite directions sharing one page.
 
 | Part | Choice | Why | Trade-off |
 |---|---|---|---|
-| Text recognition | **PaddleOCR** (PP-OCRv4, Arabic model) | Best free Arabic OCR. Runs locally, so no per-page cost and drawings never leave the machine. | Slower than a cloud OCR API, and its Arabic model is a version behind the newest. |
+| Text recognition | **PaddleOCR** (PP-OCRv4, Arabic model) | Best free Arabic OCR. Runs locally, so no per-page cost and drawings never leave the machine. | Slower than a cloud OCR API, and its Arabic model is a version behind the newest (see Open items). |
 | Shape detection | **OpenCV** contour analysis | Geometry is maths, not AI — it is instant, free and predictable. | Only recognises simple shapes. Anything irregular is cropped as a picture instead. |
 | Layout analysis | **PaddleOCR PP-Structure** | Already in the stack, separates text areas from drawing areas. | Trained on documents, not floor plans, so it is the weakest link. We compensate by also masking the detected words. |
-| Text correction | **Vision LLM via OpenRouter** (currently Gemma 4, free tier) | Sees the whole drawing, so it can fix OCR errors using visual context. One provider, swappable models. | Free tier rate-limits unpredictably. Treated as optional — if it fails we return the raw OCR text. |
-| Word output | **python-docx** with positioned text boxes | Puts every element at an absolute position, which is what "keep the layout" requires. | Output is a canvas of boxes, not flowing editable paragraphs. |
+| Text correction | **Vision LLM via OpenRouter** (currently a free-tier Gemma model) | Double-checks words the OCR is unsure about, by looking at the image. One provider, swappable models. | Free tier rate-limits unpredictably. Treated as optional — if it fails we return the raw OCR text. |
+| Word output | **python-docx** with positioned text boxes | Puts every element at an exact position, which is what "keep the layout" requires. | Output is a canvas of boxes, not flowing editable paragraphs. |
 | Storage | **PostgreSQL** | Stores user corrections for the feedback loop. | — |
 | Packaging | **Docker Compose** | One command starts the service and its database anywhere. | — |
 
-**The overall trade-off:** OCR runs locally and free, and the AI is used only for the
-few words OCR is unsure about. That keeps cost near zero and keeps the service working
-even when the AI provider is down.
+**The overall trade-off:** OCR runs locally and free, and the AI is used only to
+double-check the few words OCR is unsure about. That keeps cost near zero and keeps
+the service working even when the AI provider is down.
 
 ---
 
-## What we fixed this session
+## Round 2 — what the first real document exposed
 
-This was the first run on a real image rather than unit tests. It surfaced several
-genuine problems, all now fixed.
+The first genuine document we ran (a printed Arabic university registration table)
+exposed three faults our own test image was never shaped in a way to reveal.
 
-- **Arabic came out backwards.** The OCR reports Arabic in the order letters *appear*
-  on the page, the reverse of how Arabic is stored. Word would then reverse it again,
-  so documents showed nonsense. Most serious issue found; invisible until we looked at
-  real output.
-- **Words were in the wrong order.** "GROUND FLOOR PLAN" came out as "FLOOR PLAN
-  GROUND". Lines are now read in their own direction, right-to-left for Arabic.
-- **Page-straightening could destroy a drawing.** A long diagonal — a roof slope or
-  section line, common in these drawings — was misread as page tilt and rotated the
-  whole image 45 degrees.
-- **Shapes and text were double-counted**, so text appeared twice: once as words, once
-  as a pasted picture.
-- **Large scans were processed at full size**, wasting seconds and sending huge images
-  to the AI on every request.
-- **Missing API options.** Callers can now set the confidence threshold, language, and
-  symbol labelling, with invalid values rejected.
-
-**Test result:** a floor plan with 3 rooms, a circle, a triangle, an irregular symbol
-and 12 mixed Arabic/English labels. All 21 text labels found at 96% average
-confidence, all shapes classified correctly, irregular symbol correctly identified as
-a grid reference marker.
-
-**Proof the AI correction works:** OCR misread "LIVING" as "LMVING" — but at 93%
-confidence, so it was never flagged. Forcing every word through the AI reviewer caught
-it, corrected it, and highlighted it yellow. That threshold is a tuning decision worth
-your input: lower is faster but misses confident-but-wrong readings like this one.
+1. **Positions were wrong on every document.** Elements were placed as if every page
+   were the same fixed shape, regardless of the actual shape of the original. The test
+   document was distorted 44%, worse toward the bottom of the page. The page now
+   matches the proportions of whatever is fed in; measured error afterwards: **0.001%**.
+   Separately, the document had also been the wrong paper size all along (US Letter
+   instead of A4), while the positioning maths assumed A4 — that is now consistent.
+2. **Most of the drawing was being thrown away.** Only the outermost outline of each
+   shape was kept, so anything drawn *inside* a room or a table — interior walls,
+   fixtures, furniture — never reached the document. On the test drawing this went
+   from 11 elements captured to 30. Anything still unrecognised is now cut out of the
+   original image and pasted in at the right position, so nothing on the page is
+   silently lost.
+3. **There was no way to tell whether the AI reviewer had run.** "0 corrections"
+   looked identical whether the model had checked every word and approved it, or had
+   never been reached at all. The result now says which, and why.
 
 ---
 
-## Speed
+## Round 3 — the AI reviewer, fixed properly
 
-| | |
-|---|---|
-| Core pipeline (OCR, shapes, Word generation) | **3.2 seconds** |
-| Plus symbol naming | 7–27 seconds |
+Our working theory had been that the AI reviewer was being rate-limited. Live testing
+ruled that out: the key was valid, the model responded, and the connection worked.
+The real problem was how we were asking the question. The reviewer was shown the
+*entire page* and asked what a handful of small, low-confidence words said, with no
+indication of where on the page they were. It could not find them, so it simply
+repeated the OCR's original guess back — at maximum confidence, even when that guess
+was wrong.
 
-The core is fast and predictable. All variability comes from the external AI service
-on its free tier. Everything runs on CPU — no special hardware needed.
+It now receives a close-up, enlarged photo of each individual word instead of the
+whole page.
+
+To test this properly, we designed a check the model could not pass by guessing: each
+word was deliberately mislabelled with a plausible but *unrelated* wrong answer (the
+word "BEDROOM" was flagged as if it might say "PARKING"), so the only way to answer
+correctly was to actually read the image.
+
+| | Old (whole page) | New (word close-ups) |
+|---|---|---|
+| Correctly re-read | 0 out of 5 | 5 out of 5 |
+
+Along the way we also found the reviewer occasionally returns a blank answer instead
+of a word. The old code would have written that blank into the document, silently
+erasing a correct piece of text. Blank answers are now rejected rather than applied.
+
+**Confirmed on the real service.** Running the full pipeline with every word sent for
+review, the reviewer found and fixed a genuine error — the OCR had read the word
+"LIVING" as "LMVING" — and correctly left the other eleven words it checked untouched,
+including all the Arabic. Nothing correct was changed into something wrong, which is
+the failure we were most concerned about.
 
 ---
 
-## Second round — what the first real document exposed
+## Security
 
-A genuine Arabic document (a university registration table, 540×1200) was processed.
-It found 74 text elements and the Arabic came out correctly readable, which confirms
-the direction-of-text fix holds outside our own test image. It also exposed three
-faults that the synthetic drawing could never have shown, all now fixed.
+A routine dependency check found that the library used to decode uploaded images is
+being held at an old version — a requirement of the OCR engine — and that old version
+has a publicly known flaw, already exploited elsewhere, affecting one image format
+(WebP).
 
-- **Everything was in the wrong place.** Positions were being stretched to fill an A4
-  page regardless of the shape of the original — this document was distorted by 44%,
-  and the error grew toward the bottom of the page. The page now matches the
-  proportions of whatever is fed in. Measured error afterwards: **0.001%**.
-- **Most of the drawing was being thrown away.** Only the outermost outline of each
-  shape was kept, so everything drawn *inside* a room or a table was discarded before
-  it ever reached the document. On our test drawing this went from 11 elements
-  captured to 30. Anything still unrecognised is now cut out of the original image and
-  pasted in at the right position, so nothing on the page is silently lost.
-- **We could not tell whether the AI reviewer had run.** "0 corrections" looked
-  identical whether the model had checked every word and approved it, or had never
-  been reached at all. The result now says which, and why.
+Checking the file's declared type was not enough, because that label can be faked by
+whoever uploads the file. So the service now inspects the actual file contents and
+refuses any image that is really a WebP, regardless of what it claims to be. Uploads
+in other formats (JPEG, PNG, TIFF, BMP) are unaffected.
 
-We also found the AI reviewer, when it does answer, sometimes returns blank
-corrections — which would have silently erased correct text from the document. That is
-now rejected rather than applied.
+We also removed two unused packages found during the same check.
+
+---
 
 ## Open items
 
-- **One real document is not enough.** The document tested was a printed table, not an
-  architectural drawing. **Getting 5–10 real drawings is still the most valuable next
-  step.**
-- **The free AI model is not good enough at this task.** Given a full page and asked
-  about a few small words, it either echoed them back unchanged or returned blanks. It
-  is not being rate-limited — it simply cannot locate a tiny word in a large image. The
-  fix is either a paid model or sending it a close-up of each word rather than the whole
-  page.
-- **Free AI tier is not production-ready.** It rate-limited us mid-testing and forced
-  a model switch. It now retries, falls back through a list of alternative models, and
-  gives up after 60 seconds rather than stalling a request. A paid key is still needed
-  before real use.
-- **Feedback loop half-built.** User corrections are saved to the database as designed,
-  but not yet fed back to improve future results.
-- **Deployment target undecided.** Whether the host has a graphics card changes several
-  technical choices, so we have not optimised for hardware we may not have.
+- **Only one real document has been tested**, and it was a printed table rather than
+  an architectural drawing. Getting 5–10 real drawings remains the most valuable next
+  step.
+- **The free AI tier still rate-limits unpredictably**, and is sometimes simply slow.
+  A paid key is needed before production use. In the meantime the system retries,
+  falls back to alternative models, and enforces a 60-second limit on each of the two
+  AI stages — so a request that uses both and hits the limit on each can take about two
+  minutes at worst before returning the document from the raw OCR text. Testing caught
+  an earlier version of this limit not being enforced at all; it now is.
+- **The feedback loop is half-built.** User corrections are saved to the database but
+  not yet used to improve future results.
+- **Deployment target still undecided.**
+- **A newer version of the OCR engine (PP-OCRv5) would improve Arabic accuracy**, but
+  it is a substantial migration rather than a simple upgrade — it changes several
+  internal interfaces and risks reintroducing a crash previously seen on certain Intel
+  processors. Worth scoping as its own piece of work.
 
 ---
 
 ## Next steps
 
 1. Get real drawings and test against them.
-2. Tune the confidence threshold using those results.
+2. Move off the free AI tier.
 3. Decide the deployment target.
 4. Connect the correction feedback loop.
-5. Move off the free AI tier.
-
-109 automated tests, all passing.
+5. Scope the OCR engine upgrade separately.

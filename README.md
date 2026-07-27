@@ -158,9 +158,24 @@ ran" (`state: "failed"` / `"not_attempted"`) — the counts alone cannot tell th
 | `not_attempted` | `no_flagged_words`, `no_shapes_to_label`, `not_configured` |
 | `failed` | `rate_limited`, `invalid_model`, `unauthorized`, `network`, `server_error`, `parse_error`, `timed_out`, `unknown` |
 
-LLM work is bounded to `TOTAL_LLM_BUDGET_SECONDS` (60s) across the entire retry and
-fallback chain. When it expires the pipeline returns the document built from raw OCR
-text and reports `timed_out` — it never fails the request.
+LLM work is bounded to `TOTAL_LLM_BUDGET_SECONDS` (60s) — a real wall-clock ceiling,
+enforced by running each model call under a `thread.join(timeout=...)`, not just a
+check between attempts. That distinction matters: a plain per-request timeout can't
+guarantee this, because httpx (which the OpenAI SDK sits on) only exposes phase
+timeouts — connect/read/write/pool — never a total one, and its read timeout resets on
+every byte received. A provider that trickles keep-alive bytes while a request sits
+queued can hold a read timeout open indefinitely; only a wall-clock join actually cuts
+a stuck call off. When the budget expires the pipeline returns the document built from
+raw OCR text and reports `timed_out` — it never fails the request.
+
+The 60s applies per call — one shared deadline across every chunk, model, and retry
+within a single call to word correction, and separately within a single call to shape
+labelling. The two are independent optional stages, so a request that exercises both
+and has both time out end to end can take up to 2x this budget (~120s), not a hard
+120s cap on the whole request. A stuck call's worker thread is abandoned rather than
+killed (Python can't forcibly stop a thread) — it's a daemon thread, so it can't block
+the process from shutting down, but it does keep holding its socket in the background
+until the call eventually errors out on its own.
 
 Decode the `.docx`:
 ```python

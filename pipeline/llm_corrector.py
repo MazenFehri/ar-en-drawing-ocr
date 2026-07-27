@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import random
+import threading
 import time
 import cv2
 import numpy as np
@@ -55,14 +56,32 @@ MAX_BACKOFF_SECONDS = 8.0
 # exactly the kind of "hangs for minutes" behaviour the caller must not see, so
 # the client below is built with an explicit timeout and max_retries=0 — our
 # retry loop is the only one in control of backoff and attempt count.
+#
+# This is a *client-level default*, not a guarantee: httpx.Timeout (which the
+# SDK sits on) only has connect/read/write/pool phases, never a total one, and
+# the read phase resets on every byte received rather than counting from the
+# start of the call — OpenRouter's free-tier proxies reportedly trickle
+# keep-alive bytes while a request sits queued, which can hold this open past
+# 30s indefinitely. See _call_with_hard_timeout for the actual wall-clock cap.
 REQUEST_TIMEOUT_SECONDS = 30.0
 
 # Per-model bounds still multiply out: 3 models x 3 attempts x 30s + backoff is
 # over 5 minutes with the provider down, and correction is only an enhancement —
-# nobody should wait that long for a document we can already produce. One wall
-# clock budget across the whole fallback chain caps it regardless of the maths.
-# ponytail: single flat budget, not a per-stage one. If shape labelling and word
-# correction ever need different allowances, pass the budget in per call site.
+# nobody should wait that long for a document we can already produce. One
+# deadline, computed once per call (apply_corrections / label_complex_shapes)
+# and threaded through every chunk, model, and retry inside it, caps the whole
+# call regardless of the maths — a page with several chunks of flagged words
+# no longer gets one full budget *per chunk*.
+# ponytail: the deadline is shared across every chunk *within* one call, but
+# word correction and shape labelling are separate calls with separate
+# deadlines — a single /process request that exercises both and has both time
+# out end to end can take up to 2x this budget. Rejected merging them into one
+# shared deadline: doing so needs pipeline/__init__.py (the caller, a stage
+# apart from this file) to own and pass a single deadline into both calls,
+# which is more machinery across a module boundary than this bug is worth.
+# Upgrade path: if that 2x ever matters in practice, have pipeline/__init__.py
+# compute one deadline and pass it into both apply_corrections(..., deadline=)
+# and label_complex_shapes(..., deadline=).
 TOTAL_LLM_BUDGET_SECONDS = 60.0
 
 
@@ -82,7 +101,8 @@ def _status(state: str, reason: str | None = None, model: str | None = None) -> 
     reason (when not None):
       not_attempted -> "no_flagged_words" / "no_shapes_to_label" / "not_configured"
       failed        -> "rate_limited" / "invalid_model" / "unauthorized" /
-                       "network" / "server_error" / "parse_error" / "unknown"
+                       "network" / "server_error" / "parse_error" / "timed_out" /
+                       "unknown"
     model: the model ID that produced a "success", else None.
     """
     return {"state": state, "reason": reason, "model": model}
@@ -129,11 +149,14 @@ def apply_corrections(
     correction_by_id: dict[str, dict] = {}
     last_status = _status("failed", "unknown")
     any_success = False
+    # One deadline for every chunk in this call, not one per chunk — see the
+    # ponytail comment on TOTAL_LLM_BUDGET_SECONDS.
+    deadline = time.monotonic() + TOTAL_LLM_BUDGET_SECONDS
 
     for chunk in _chunks(flagged, MAX_WORDS_PER_CALL):
         content = _build_word_content(page, chunk)
         try:
-            corrections, chunk_status = _request_with_fallback(client, SYSTEM_PROMPT, content)
+            corrections, chunk_status = _request_with_fallback(client, SYSTEM_PROMPT, content, deadline)
             for item in corrections:
                 if isinstance(item, dict) and "index" in item and "corrected" in item:
                     i = int(item["index"])
@@ -201,12 +224,15 @@ def label_complex_shapes(
     by_id: dict[str, dict] = {}
     last_status = _status("failed", "unknown")
     any_success = False
+    # One deadline for every chunk in this call, not one per chunk — see the
+    # ponytail comment on TOTAL_LLM_BUDGET_SECONDS.
+    deadline = time.monotonic() + TOTAL_LLM_BUDGET_SECONDS
 
     for start in range(0, len(targets), MAX_CROPS_PER_CALL):
         chunk = targets[start:start + MAX_CROPS_PER_CALL]
         content = _build_shape_content(chunk, crop_png_bytes)
         try:
-            raw, chunk_status = _request_with_fallback(client, SHAPE_PROMPT, content)
+            raw, chunk_status = _request_with_fallback(client, SHAPE_PROMPT, content, deadline)
             for item in raw:
                 if isinstance(item, dict) and "index" in item and "label" in item:
                     i = int(item["index"])
@@ -289,14 +315,15 @@ def _build_shape_content(chunk: list[ComplexShapeElement], crop_png_bytes: dict[
     return content
 
 
-def _request_with_fallback(client, system_prompt: str, user_content: list[dict]) -> tuple[list[dict], dict]:
+def _request_with_fallback(client, system_prompt: str, user_content: list[dict],
+                            deadline: float) -> tuple[list[dict], dict]:
     """Try each configured model in order (primary, then fallbacks), retrying
     transient failures on each with backoff. Raises _LLMFailure if every model
-    in the chain fails.
+    in the chain fails, or "timed_out" once `deadline` (a single monotonic
+    clock reading shared across every chunk of the call this came from) passes.
     """
     models = _model_chain()
     last_reason = "unknown"
-    deadline = time.monotonic() + TOTAL_LLM_BUDGET_SECONDS
     for i, model in enumerate(models):
         if time.monotonic() >= deadline:
             logger.warning("LLM budget of %.0fs exhausted, giving up", TOTAL_LLM_BUDGET_SECONDS)
@@ -323,22 +350,25 @@ def _call_with_retry(client, model: str, system_prompt: str, user_content: list[
     limit) or 5xx / connection error is worth retrying; a 400 (bad request /
     invalid model) or 401 (bad key) will just fail the same way again, so those
     propagate immediately and let the caller move to the next fallback model.
+
+    The deadline is now checked before *every* attempt, not just before
+    sleeping between them — previously a model's first attempt on a fresh
+    fallback could still start after the budget was already gone. Each attempt
+    itself runs under _call_with_hard_timeout, which is what actually stops a
+    single call from blowing the whole budget once it's in flight. A hard
+    timeout is not retried — it already spent its share of the budget — it
+    propagates so the fallback chain can move on or give up.
     """
     from openai import RateLimitError, APIConnectionError, InternalServerError
     retryable = (RateLimitError, APIConnectionError, InternalServerError)
 
     delay = BASE_BACKOFF_SECONDS
     for attempt in range(1, max_attempts + 1):
+        remaining = (deadline - time.monotonic()) if deadline is not None else REQUEST_TIMEOUT_SECONDS
+        if remaining <= 0:
+            raise TimeoutError("LLM budget exhausted before attempt")
         try:
-            response = client.chat.completions.create(
-                model=model,
-                max_tokens=1024,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-            )
-            return response.choices[0].message.content
+            return _call_with_hard_timeout(client, model, system_prompt, user_content, remaining)
         except retryable as exc:
             if attempt == max_attempts:
                 raise
@@ -353,6 +383,64 @@ def _call_with_retry(client, model: str, system_prompt: str, user_content: list[
             )
             time.sleep(sleep_s)
             delay = min(delay * 2, MAX_BACKOFF_SECONDS)
+
+
+# httpx (which the openai SDK sits on) only exposes phase timeouts — connect/
+# read/write/pool — never a *total* one (httpx.Timeout takes exactly those
+# four and nothing else). Worse, the read phase is re-armed on every byte
+# received rather than counted from the start of the call: httpcore's
+# _sync/http11.py issues a fresh `timeout=read_timeout` on each individual
+# socket read, so a provider that trickles a byte every <30s never trips it.
+# OpenRouter's free-tier proxies are reported to do exactly that while a
+# request sits queued. That means no combination of client/request timeout=
+# can guarantee this call returns on time — a thread.join(timeout=) is the
+# only thing that actually enforces wall-clock from the caller's side.
+# ponytail: a timed-out call's background thread is not killed, only
+# abandoned — it keeps holding its socket until the call eventually errors out
+# on its own or the process exits. daemon=True at least means it can't block
+# process/interpreter shutdown (verified: a non-daemon thread here would make
+# the whole process wait out the stuck call before exiting). Accepted because
+# the caller returning on time matters more than one leaked thread, and the
+# cost is bounded to one thread per call that's actually stuck, not unlimited.
+# Upgrade path: if leaked threads ever prove to matter, switch to the SDK's
+# async client + asyncio.wait_for, which can actually cancel the in-flight
+# request instead of abandoning a thread.
+def _call_with_hard_timeout(client, model: str, system_prompt: str, user_content: list[dict],
+                             timeout_s: float) -> str:
+    """Run one create() call under a hard wall-clock ceiling of timeout_s.
+
+    Raises TimeoutError (classified by _classify_error as "timed_out") if the
+    call is still running once timeout_s elapses, regardless of what the
+    provider or the socket are doing.
+    """
+    outcome: dict = {}
+
+    def _run():
+        try:
+            outcome["response"] = client.chat.completions.create(
+                model=model,
+                max_tokens=1024,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                # Best-effort defense in depth: in the common (non-adversarial)
+                # case this makes the SDK's own timeout fire close to on time
+                # instead of at REQUEST_TIMEOUT_SECONDS. It's not what enforces
+                # the ceiling below — see the comment above this function.
+                timeout=min(timeout_s, REQUEST_TIMEOUT_SECONDS),
+            )
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+    if thread.is_alive():
+        raise TimeoutError(f"LLM call to {model} exceeded {timeout_s:.1f}s hard ceiling")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["response"].choices[0].message.content
 
 
 def _backoff_seconds(exc: Exception, base_delay: float) -> float:
@@ -382,8 +470,15 @@ def _classify_error(exc: Exception) -> str:
     """Map an exception to a reason code the caller can act on."""
     from openai import (
         RateLimitError, BadRequestError, NotFoundError, AuthenticationError,
-        PermissionDeniedError, APIConnectionError, InternalServerError,
+        PermissionDeniedError, APIConnectionError, APITimeoutError, InternalServerError,
     )
+    # Our own hard wall-clock ceiling raises plain TimeoutError; the SDK's own
+    # timeout (APITimeoutError) is a subclass of APIConnectionError, not of
+    # TimeoutError, so it needs its own check too — both mean the same thing
+    # to the caller and must be checked before the generic APIConnectionError
+    # case below, since APITimeoutError would otherwise match that first.
+    if isinstance(exc, (TimeoutError, APITimeoutError)):
+        return "timed_out"
     if isinstance(exc, RateLimitError):
         return "rate_limited"
     if isinstance(exc, (BadRequestError, NotFoundError)):

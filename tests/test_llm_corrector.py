@@ -298,6 +298,89 @@ def test_budget_caps_wall_clock_across_whole_fallback_chain(mock_client_fn):
     assert result[0].content == "entrnce"
 
 
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.openrouter_fallback_models", "")
+@patch("pipeline.llm_corrector.TOTAL_LLM_BUDGET_SECONDS", 1.0)
+@patch("pipeline.llm_corrector._get_client")
+def test_hard_timeout_caps_wall_clock_even_if_call_never_returns(mock_client_fn):
+    """The actual bug from the live Docker run: a call already in flight can't
+    be interrupted by a deadline check that only runs *between* attempts, and
+    REQUEST_TIMEOUT_SECONDS is a read timeout that a provider trickling
+    keep-alive bytes can hold open indefinitely. Real elapsed time, real sleep
+    in the mocked call (not mocked time.sleep) — this is the only way to prove
+    a wall-clock guarantee rather than just asserting a constant exists.
+    """
+    import time as _time
+
+    def _blocks_far_past_the_budget(*args, **kwargs):
+        _time.sleep(4)
+        raise AssertionError("must never complete before the hard timeout fires")
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = _blocks_far_past_the_budget
+    mock_client_fn.return_value = mock_client
+
+    start = _time.monotonic()
+    result, status = apply_corrections(
+        [make_text_el("t1", "entrnce", 0.48)], FAKE_PAGE, confidence_threshold=0.75
+    )
+    elapsed = _time.monotonic() - start
+
+    assert elapsed < 3.0, f"hard ceiling not enforced: took {elapsed:.1f}s against a 1s budget / 4s block"
+    assert status["state"] == "failed"
+    assert status["reason"] == "timed_out"
+    assert result[0].content == "entrnce"  # graceful degradation: original text kept
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.openrouter_fallback_models", "")
+@patch("pipeline.llm_corrector.TOTAL_LLM_BUDGET_SECONDS", 0.5)
+@patch("pipeline.llm_corrector.MAX_WORDS_PER_CALL", 1)
+@patch("pipeline.llm_corrector._get_client")
+def test_budget_is_shared_across_chunks_not_reset_per_chunk(mock_client_fn):
+    """apply_corrections can split flagged words into several chunks; each
+    used to get its own fresh TOTAL_LLM_BUDGET_SECONDS deadline, so a page
+    with N chunks could spend up to N x the documented budget (this is
+    plausibly what turned a 60s budget into the >120s hang seen in the live
+    Docker run). One deadline computed once and threaded through every chunk
+    closes that gap: only the first chunk should pay for the hard-timeout
+    wait; the rest should see the shared deadline already gone and give up
+    immediately without attempting a call.
+
+    Real sleep in the mocked call (not mocked time.sleep) is required to prove
+    this: a mock that fails instantly can't distinguish "one shared deadline"
+    from "one fresh deadline per chunk," since both would finish fast.
+    """
+    import time as _time
+
+    def _blocks_past_the_budget(*args, **kwargs):
+        _time.sleep(0.6)  # longer than the 0.5s budget
+        raise _rate_limit_exc()
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = _blocks_past_the_budget
+    mock_client_fn.return_value = mock_client
+
+    # MAX_WORDS_PER_CALL=1 forces 3 flagged words into 3 separate chunks.
+    elements = [
+        make_text_el("t0", "entrnce", 0.4),
+        make_text_el("t1", "kitcen", 0.3),
+        make_text_el("t2", "غرفة", 0.2),
+    ]
+
+    start = _time.monotonic()
+    result, status = apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+    elapsed = _time.monotonic() - start
+
+    # One chunk's hard-timeout wait (~0.5s) plus two chunks that see the
+    # already-expired shared deadline and skip the call entirely. Without the
+    # fix each of the 3 chunks would pay its own ~0.5s wait: ~1.5s total.
+    assert elapsed < 1.0, f"budget reset per chunk: took {elapsed:.1f}s for 3 chunks on a 0.5s budget"
+    assert status["state"] == "failed"
+    assert status["reason"] == "timed_out"
+    assert [e.content for e in result] == ["entrnce", "kitcen", "غرفة"]
+
+
 def test_build_prompt_contains_words():
     elements = [make_text_el("t0", "entrnce", 0.48)]
     prompt = _build_prompt(elements)
