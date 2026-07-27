@@ -22,3 +22,6 @@ sidecar.json
 response.json
 
 .vscode/
+
+# Word lock files (appear while a .docx is open)
+~$*
