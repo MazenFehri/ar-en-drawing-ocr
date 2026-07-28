@@ -24,6 +24,13 @@ class TextElement(BaseModel):
     confidence: float
     llm_correction: Optional[LLMCorrection] = None
     highlight: Optional[Literal["yellow", "red"]] = None
+    # id of the smallest detected shape (models/elements.ComplexShapeElement /
+    # SimpleShapeElement) whose bbox strictly contains this word's bbox, e.g. the
+    # class box a UML attribute label sits inside. None is the common case (most
+    # words, and most drawings with no shapes at all) — set by
+    # pipeline/layout_reconstructor.py, consumed by pipeline/llm_corrector.py to
+    # find confident sibling text for a flagged word's correction prompt.
+    container_shape_id: Optional[str] = None
 
 
 class SimpleShapeElement(BaseModel):

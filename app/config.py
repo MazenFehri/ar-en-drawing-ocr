@@ -11,6 +11,16 @@ class Settings(BaseSettings):
     openrouter_fallback_models: str = "google/gemma-4-31b-it:free,nvidia/nemotron-nano-12b-v2-vl:free"
     confidence_threshold: float = 0.75
     label_shapes: bool = True
+    # Include confident sibling OCR text (same detected shape, e.g. same UML class
+    # box) as context in a flagged word's correction prompt. Default OFF: measured
+    # on class-diagram.png this only reaches 1-2 of 4 flagged words (most flagged
+    # tokens there are relationship-cardinality labels that live outside any box by
+    # design, not inside one), and Kanerva et al. 2025 found added prompt context
+    # helps 27B/70B vision models but makes 8B-class ones *worse* — this repo's
+    # configured model (nvidia/nemotron-nano-12b-v2-vl:free) sits right in that
+    # smaller tier. Flip on only once a model upgrade or a bigger measured benefit
+    # justifies the risk.
+    shape_context_enabled: bool = False
     database_url: str = "postgresql://ocr:ocr@localhost:5432/ocr_db"
     log_level: str = "INFO"
 

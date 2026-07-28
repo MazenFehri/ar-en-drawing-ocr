@@ -180,6 +180,17 @@ def apply_corrections(
         return elements, _status("failed", "parse_error")
 
     client = _get_client()
+    # Confident sibling text sharing a flagged word's innermost detected shape
+    # (see TextElement.container_shape_id) — e.g. the other attribute labels
+    # already read correctly inside the same UML class box. Off by default; see
+    # settings.shape_context_enabled for why. Computed once here (not per-chunk):
+    # it only depends on `elements`, which chunking doesn't change.
+    sibling_context_by_id: dict[str, list[str]] = {}
+    if settings.shape_context_enabled:
+        sibling_context_by_id = {
+            el.id: _sibling_context(el, elements, confidence_threshold) for el in flagged
+        }
+
     # Keyed by element id, not by OCR text: the model may alter the string it
     # echoes back, and two identical words at different confidences (e.g. the
     # same label twice on a page) must be corrected independently. Index-in-chunk
@@ -200,7 +211,7 @@ def apply_corrections(
     failed_models: dict[str, str] = {}
 
     for chunk in _chunks(flagged, MAX_WORDS_PER_CALL):
-        content = _build_word_content(page, chunk)
+        content = _build_word_content(page, chunk, sibling_context_by_id)
         try:
             corrections, chunk_status = _request_with_fallback(
                 client, SYSTEM_PROMPT, content, deadline, failed_models,
@@ -466,7 +477,26 @@ def _crop_word(page: np.ndarray, bbox: BBox) -> np.ndarray:
     return crop
 
 
-def _build_word_content(page: np.ndarray, chunk: list[TextElement]) -> list[dict]:
+def _sibling_context(el: TextElement, elements: list[Element], confidence_threshold: float) -> list[str]:
+    """Confident OCR readings sharing el's innermost detected shape (see
+    TextElement.container_shape_id) — e.g. the other attribute labels already
+    read correctly inside the same UML class box as a flagged one. Empty list
+    (not None) when there's no container or no confident sibling, so callers
+    never need a None check.
+    """
+    if not el.container_shape_id:
+        return []
+    return [
+        sib.content for sib in elements
+        if isinstance(sib, TextElement) and sib.id != el.id
+        and sib.container_shape_id == el.container_shape_id
+        and sib.confidence >= confidence_threshold
+    ]
+
+
+def _build_word_content(
+    page: np.ndarray, chunk: list[TextElement], sibling_context_by_id: dict[str, list[str]] | None = None,
+) -> list[dict]:
     content = []
     for el in chunk:
         crop = _crop_word(page, el.bbox)
@@ -479,7 +509,7 @@ def _build_word_content(page: np.ndarray, chunk: list[TextElement]) -> list[dict
             _, buf = cv2.imencode(".jpg", np.zeros((1, 1, 3), dtype=np.uint8))
         b64 = base64.standard_b64encode(buf.tobytes()).decode("utf-8")
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    content.append({"type": "text", "text": _build_prompt(chunk)})
+    content.append({"type": "text", "text": _build_prompt(chunk, sibling_context_by_id)})
     return content
 
 
@@ -753,22 +783,35 @@ def _parse_json_array(content: str) -> list[dict]:
     return json.loads(text)
 
 
-def _build_prompt(flagged: list[TextElement]) -> str:
+def _build_prompt(flagged: list[TextElement], sibling_context_by_id: dict[str, list[str]] | None = None) -> str:
     # Index-based, matching _build_shape_content's "N images, in order" convention:
     # the model answers by image position, not by echoing the string back, so a
     # word the model rewrites or a duplicate word at a different confidence still
     # keys back to the right element (see correction_by_id in apply_corrections).
-    words = [
-        {"index": i, "current_guess": e.content, "confidence": round(e.confidence, 3)}
-        for i, e in enumerate(flagged)
-    ]
+    sibling_context_by_id = sibling_context_by_id or {}
+    words = []
+    for i, e in enumerate(flagged):
+        entry = {"index": i, "current_guess": e.content, "confidence": round(e.confidence, 3)}
+        siblings = sibling_context_by_id.get(e.id)
+        if siblings:
+            entry["nearby_confident_labels"] = siblings
+        words.append(entry)
+
+    context_note = (
+        " Some entries include \"nearby_confident_labels\": other text already read with "
+        "high confidence from the same box/shape on the drawing. Use those only as context "
+        "to help you disambiguate the flagged image — they are not things to correct, and "
+        "must never be copied into your answer unless the flagged crop genuinely shows that "
+        "same text."
+        if any("nearby_confident_labels" in w for w in words) else ""
+    )
     return (
         f"{len(flagged)} cropped word images, in order, each padded with a little "
         "surrounding context and upscaled if small. Below is the OCR's current guess "
         f"and confidence for each image, by index:\n{json.dumps(words, ensure_ascii=False)}\n\n"
         "Re-read each cropped image and provide the corrected reading and your certainty "
         "(0.0-1.0). If the current guess was already correct, return it unchanged. If the "
-        "crop truly can't be read, return an empty string and certainty 0.0 rather than guessing.\n"
+        f"crop truly can't be read, return an empty string and certainty 0.0 rather than guessing.{context_note}\n"
         'Return ONLY a JSON array: [{"index": 0, "corrected": "...", "certainty": 0.0}]'
     )
 

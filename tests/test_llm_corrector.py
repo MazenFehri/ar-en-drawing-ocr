@@ -21,13 +21,14 @@ def _fake_page_bytes(w=200, h=200):
 FAKE_PAGE = _fake_page_bytes()
 
 
-def make_text_el(id_, text, conf, x=0.0, y=0.0, w=0.1, h=0.02):
+def make_text_el(id_, text, conf, x=0.0, y=0.0, w=0.1, h=0.02, container_shape_id=None):
     return TextElement(
         id=id_,
         bbox=BBox(x=x, y=y, w=w, h=h),
         content=text,
         language="english" if text.isascii() else "arabic",
         confidence=conf,
+        container_shape_id=container_shape_id,
     )
 
 
@@ -961,3 +962,88 @@ def test_dedup_group_failure_still_degrades_gracefully_for_every_member(mock_cli
     for el in result:
         assert el.llm_label is None
         assert el.llm_label_certainty is None
+
+
+# --- shape-membership context injection (Phase 2: Img2UML-style association) ---
+# See models.elements.TextElement.container_shape_id (set by
+# pipeline/layout_reconstructor.py) and app.config.settings.shape_context_enabled
+# for why this is off by default.
+
+def test_build_prompt_omits_context_when_no_siblings_given():
+    """The zero-cost silent path: no sibling_context_by_id arg at all (the
+    settings-off case in apply_corrections) must produce the exact same prompt
+    as before this feature existed."""
+    elements = [make_text_el("t0", "entrnce", 0.48)]
+    prompt = _build_prompt(elements)
+    assert "nearby_confident_labels" not in prompt
+    assert "same box/shape" not in prompt
+
+
+def test_build_prompt_includes_sibling_labels_when_given():
+    flagged = [make_text_el("t0", "entrnce", 0.48)]
+    prompt = _build_prompt(flagged, sibling_context_by_id={"t0": ["Bank", "+id", "name"]})
+    assert "nearby_confident_labels" in prompt
+    assert "Bank" in prompt and "+id" in prompt
+    # the model must be told these are context, not correction candidates
+    assert "not things to correct" in prompt
+
+
+def test_build_prompt_skips_empty_sibling_list():
+    """A flagged word with a container but zero confident siblings inside it
+    (measured: the common case for a small/isolated box) must not add a bare
+    empty-list field or the disambiguation note to its entry."""
+    flagged = [make_text_el("t0", "entrnce", 0.48)]
+    prompt = _build_prompt(flagged, sibling_context_by_id={"t0": []})
+    assert "nearby_confident_labels" not in prompt
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.shape_context_enabled", False)
+@patch("pipeline.llm_corrector._get_client")
+def test_context_disabled_by_default_sends_plain_prompt(mock_client_fn):
+    """Setting defaults False -- a flagged word sharing container_shape_id with
+    a confident sibling must still get the pre-Phase-2 prompt, unchanged."""
+    mock_client_fn.return_value = _mock_client(MOCK_LLM_RESPONSE)
+    elements = [
+        make_text_el("t0", "entrnce", 0.4, container_shape_id="shape_000"),
+        make_text_el("t1", "Bank", 0.95, container_shape_id="shape_000"),
+    ]
+    apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+
+    sent_text = [c["text"] for c in _sent_content(mock_client_fn.return_value) if c["type"] == "text"][0]
+    assert "nearby_confident_labels" not in sent_text
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.shape_context_enabled", True)
+@patch("pipeline.llm_corrector._get_client")
+def test_context_enabled_sends_confident_sibling_in_same_shape(mock_client_fn):
+    """The actual Phase 2 wiring: a flagged word finds its confident same-shape
+    sibling's OCR text and it ends up in the outgoing prompt."""
+    mock_client_fn.return_value = _mock_client(MOCK_LLM_RESPONSE)
+    elements = [
+        make_text_el("t0", "entrnce", 0.4, container_shape_id="shape_000"),
+        make_text_el("t1", "Bank", 0.95, container_shape_id="shape_000"),
+        make_text_el("t2", "Unrelated", 0.95, container_shape_id="shape_099"),  # different shape
+    ]
+    apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+
+    sent_text = [c["text"] for c in _sent_content(mock_client_fn.return_value) if c["type"] == "text"][0]
+    assert "Bank" in sent_text
+    assert "Unrelated" not in sent_text  # different shape, must not leak in as context
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.shape_context_enabled", True)
+@patch("pipeline.llm_corrector._get_client")
+def test_context_enabled_no_container_is_silent_no_op(mock_client_fn):
+    """The common case per Phase 1 (most words, and every drawing with no
+    detected shapes at all): no container_shape_id must not error or add a
+    bare 'nearby_confident_labels': [] to the prompt."""
+    mock_client_fn.return_value = _mock_client(MOCK_LLM_RESPONSE)
+    elements = [make_text_el("t0", "entrnce", 0.4)]  # container_shape_id=None
+    result, status = apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+
+    sent_text = [c["text"] for c in _sent_content(mock_client_fn.return_value) if c["type"] == "text"][0]
+    assert "nearby_confident_labels" not in sent_text
+    assert status["state"] == "success"
