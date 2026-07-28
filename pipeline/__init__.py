@@ -7,12 +7,22 @@ from pipeline.preprocessor import preprocess, detect_quality
 from pipeline.layout import segment_layout
 from pipeline.shape_detector import detect_shapes
 from pipeline.ocr import run_ocr, DEFAULT_LANGUAGE_HINT
-from pipeline.llm_corrector import apply_corrections, label_complex_shapes
+from pipeline.llm_corrector import apply_corrections, label_complex_shapes, TOTAL_LLM_BUDGET_SECONDS
 from pipeline.layout_reconstructor import reconstruct_layout
 from pipeline.word_assembler import assemble_document
 from pipeline.sidecar import build_sidecar
 from utils.image_utils import ndarray_to_png_bytes
 from app.config import settings
+
+
+# Fraction of the shared LLM budget word correction may spend before shape
+# labelling gets the rest. Half each: with PER_ATTEMPT_CAP_SECONDS at 15s, 30s
+# still buys either stage two full attempts, so neither is cut to one shot.
+# ponytail: a fixed split, blind to how much work each stage actually has — a
+# page with two flagged words and fifty shapes still reserves half for the
+# words. Upgrade path if that shows up: weight the split by len(flagged) vs
+# len(crop_images), both known before either call.
+CORRECTION_BUDGET_SHARE = 0.5
 
 
 @dataclass
@@ -57,10 +67,23 @@ def process_image(
     # Stage 5: Layout reconstruction (pixel -> relative coords, reading order)
     elements = reconstruct_layout(words, shapes, img_w, img_h)
 
-    # Stage 6: LLM correction for flagged words
+    # Stage 6: LLM correction for flagged words. One deadline computed here and
+    # passed into both this call and stage 6b's label_complex_shapes below —
+    # without that they'd each get their own full TOTAL_LLM_BUDGET_SECONDS,
+    # doubling the worst-case wait for a request that hits both. See the
+    # comment on TOTAL_LLM_BUDGET_SECONDS in pipeline/llm_corrector.py.
+    llm_deadline = time.monotonic() + TOTAL_LLM_BUDGET_SECONDS
+    # Sharing one budget means whichever stage runs first can spend all of it.
+    # Measured on a 167-element page: word correction succeeded but consumed the
+    # lot, and shape labelling came back timed_out on 2 of 3 runs. Word
+    # correction therefore gets a share, not the whole thing, so labelling
+    # always has something left to work with.
+    correction_deadline = min(
+        llm_deadline, time.monotonic() + TOTAL_LLM_BUDGET_SECONDS * CORRECTION_BUDGET_SHARE,
+    )
     _, img_encoded = cv2.imencode(".jpg", preprocessed)
     elements, llm_status = apply_corrections(
-        elements, img_encoded.tobytes(), confidence_threshold=threshold,
+        elements, img_encoded.tobytes(), confidence_threshold=threshold, deadline=correction_deadline,
     )
 
     # Build crop map: shape_{j:03d} -> crop ndarray, for complex shapes
@@ -75,6 +98,7 @@ def process_image(
         elements, shape_status = label_complex_shapes(
             elements,
             {eid: ndarray_to_png_bytes(crop) for eid, crop in crop_images.items()},
+            deadline=llm_deadline,
         )
 
     # Stage 7: Word assembly. Pass the *original* aspect ratio so the page is

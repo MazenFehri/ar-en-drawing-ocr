@@ -3,7 +3,9 @@ import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
 from models.elements import TextElement, BBox, LLMCorrection, ComplexShapeElement
-from pipeline.llm_corrector import apply_corrections, _build_prompt, label_complex_shapes
+from pipeline.llm_corrector import (
+    apply_corrections, _build_prompt, label_complex_shapes, _call_with_retry,
+)
 
 
 def _fake_page_bytes(w=200, h=200):
@@ -379,6 +381,147 @@ def test_budget_is_shared_across_chunks_not_reset_per_chunk(mock_client_fn):
     assert status["state"] == "failed"
     assert status["reason"] == "timed_out"
     assert [e.content for e in result] == ["entrnce", "kitcen", "غرفة"]
+
+
+# --- Fix 1: one shared deadline across both LLM stages ---------------------
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.openrouter_fallback_models", "")
+@patch("pipeline.llm_corrector._get_client")
+def test_shared_deadline_is_respected_by_both_functions(mock_client_fn):
+    """pipeline/__init__.py computes ONE deadline before stage 6 and passes the
+    same value into both apply_corrections and label_complex_shapes. If
+    label_complex_shapes quietly computed its own fresh TOTAL_LLM_BUDGET_SECONDS
+    instead of honouring the deadline it was handed, it would get a full budget
+    of its own even though the shared one is already gone -- this is exactly
+    the 60s -> 120s doubling Fix 1 closes. Real sleep, not mocked time.sleep:
+    a mock that fails instantly can't distinguish "shared deadline" from
+    "fresh deadline per call".
+    """
+    import time as _time
+
+    def _blocks_past_the_budget(*args, **kwargs):
+        _time.sleep(0.6)  # longer than the 0.5s shared budget below
+        raise _rate_limit_exc()
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = _blocks_past_the_budget
+    mock_client_fn.return_value = mock_client
+
+    shared_deadline = _time.monotonic() + 0.5
+
+    # First call burns (most of) the shared deadline on its one hard-timeout wait.
+    text_result, text_status = apply_corrections(
+        [make_text_el("t1", "entrnce", 0.48)], FAKE_PAGE, confidence_threshold=0.75,
+        deadline=shared_deadline,
+    )
+    assert text_status["state"] == "failed"
+    mock_client.chat.completions.create.assert_called_once()
+
+    # Second call gets the SAME (now-expired) deadline -- it must give up
+    # immediately rather than computing a fresh full budget of its own.
+    start = _time.monotonic()
+    shape_result, shape_status = label_complex_shapes(
+        [make_shape_el("s0")], {"s0": b"fake-png-bytes"}, deadline=shared_deadline,
+    )
+    elapsed = _time.monotonic() - start
+
+    assert elapsed < 0.3, f"label_complex_shapes got a fresh budget: took {elapsed:.1f}s"
+    assert shape_status["state"] == "failed"
+    assert shape_status["reason"] == "timed_out"
+    # Still only the one call from the text-correction stage -- shape labelling
+    # never even reached the provider.
+    mock_client.chat.completions.create.assert_called_once()
+
+
+# --- Fix 2: a single attempt is capped below the whole remaining budget ----
+
+@patch("pipeline.llm_corrector.PER_ATTEMPT_CAP_SECONDS", 0.3)
+def test_call_with_retry_never_exceeds_per_attempt_cap():
+    """Even with a huge remaining budget, one attempt must not run past
+    PER_ATTEMPT_CAP_SECONDS -- otherwise a single hanging model call eats the
+    whole shared deadline and the 3-model fallback chain never gets a turn.
+    Real sleep in the mocked call, not mocked time.sleep -- proves the actual
+    wall-clock ceiling, not just that a constant exists.
+    """
+    import time as _time
+
+    def _blocks_forever(*args, **kwargs):
+        _time.sleep(5)
+        raise AssertionError("must never complete before the per-attempt cap fires")
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = _blocks_forever
+
+    huge_deadline = _time.monotonic() + 1000  # budget far larger than the cap
+
+    start = _time.monotonic()
+    with pytest.raises(TimeoutError):
+        _call_with_retry(
+            mock_client, "some/model", "sys prompt", [{"type": "text", "text": "hi"}],
+            max_attempts=1, deadline=huge_deadline,
+        )
+    elapsed = _time.monotonic() - start
+
+    assert elapsed < 1.0, f"attempt ran past PER_ATTEMPT_CAP_SECONDS: took {elapsed:.1f}s"
+
+
+# --- Fix 3: a model that already failed permanently isn't retried per chunk -
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.openrouter_fallback_models", "")
+@patch("pipeline.llm_corrector.MAX_WORDS_PER_CALL", 1)
+@patch("pipeline.llm_corrector._get_client")
+def test_permanently_failed_model_not_retried_within_call_but_fresh_call_tries_again(mock_client_fn):
+    """A model that fails with a permanent reason (404 'no endpoints found
+    that support image input' -> invalid_model) fails the exact same way on
+    every chunk, so it must be tried once per call, not once per chunk --
+    shape labelling can have up to 6 chunks, so this is real waste otherwise.
+
+    The blacklist must be scoped to a single call, not module-level state, or
+    one bad 404 would permanently disable a model for every future request --
+    the second half of this test proves a fresh call tries the model again.
+    """
+    from openai import NotFoundError
+    import httpx
+
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(
+        404, request=request, json={"error": "no endpoints found that support image input"}
+    )
+    not_found_exc = NotFoundError(
+        "no endpoints found that support image input", response=response,
+        body={"error": "no endpoints found that support image input"},
+    )
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = not_found_exc
+    mock_client_fn.return_value = mock_client
+
+    # 3 flagged words, MAX_WORDS_PER_CALL=1 forces 3 chunks in this one call.
+    elements = [
+        make_text_el("t0", "entrnce", 0.4),
+        make_text_el("t1", "kitcen", 0.3),
+        make_text_el("t2", "غرفة", 0.2),
+    ]
+    result, status = apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+
+    # Only the first chunk actually calls the provider; chunks 2 and 3 see the
+    # model already blacklisted for this call and skip it without calling.
+    assert mock_client.chat.completions.create.call_count == 1
+    assert status["state"] == "failed"
+    assert status["reason"] == "invalid_model"
+    assert [e.content for e in result] == ["entrnce", "kitcen", "غرفة"]
+
+    # A brand new call, same client mock: the model must be tried again --
+    # proof the "already failed" set didn't leak past the call that built it.
+    mock_client.chat.completions.create.reset_mock()
+    mock_client.chat.completions.create.side_effect = not_found_exc
+    result2, status2 = apply_corrections(
+        [make_text_el("t0", "entrnce", 0.4)], FAKE_PAGE, confidence_threshold=0.75
+    )
+    assert mock_client.chat.completions.create.call_count == 1
+    assert status2["reason"] == "invalid_model"
 
 
 # --- Malformed / empty completion responses (the 'choices' TypeError bug) ---

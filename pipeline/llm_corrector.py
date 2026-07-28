@@ -65,6 +65,24 @@ MAX_BACKOFF_SECONDS = 8.0
 # 30s indefinitely. See _call_with_hard_timeout for the actual wall-clock cap.
 REQUEST_TIMEOUT_SECONDS = 30.0
 
+# _call_with_retry used to hand one attempt the *entire* remaining deadline as
+# its hard timeout — fine when the deadline was a fresh 60s per call, but with
+# TOTAL_LLM_BUDGET_SECONDS now shared across both LLM stages (see above), one
+# hanging first attempt could eat the whole shared budget and the 3-model
+# fallback chain would never get a turn. Cap a single attempt well below the
+# budget so several models can actually be tried before the deadline is gone.
+# 60s budget / 15s cap = up to 4 attempts get to run their full cap before the
+# call gives up outright — enough for the primary model plus both configured
+# fallbacks with a little room left for backoff, even if every one of them
+# hangs to the cap rather than failing fast. Also comfortably under
+# REQUEST_TIMEOUT_SECONDS (30s), so this is the number that actually governs
+# _call_with_hard_timeout's ceiling in practice, not just a paper constant.
+# ponytail: a flat cap, not split per-model or weighted toward the primary.
+# Upgrade path: if one particular model in the chain is known to be
+# consistently slow-but-eventually-correct, give it a larger per-model cap
+# instead of shrinking this for everyone.
+PER_ATTEMPT_CAP_SECONDS = 15.0
+
 # Per-model bounds still multiply out: 3 models x 3 attempts x 30s + backoff is
 # over 5 minutes with the provider down, and correction is only an enhancement —
 # nobody should wait that long for a document we can already produce. One
@@ -72,16 +90,19 @@ REQUEST_TIMEOUT_SECONDS = 30.0
 # and threaded through every chunk, model, and retry inside it, caps the whole
 # call regardless of the maths — a page with several chunks of flagged words
 # no longer gets one full budget *per chunk*.
-# ponytail: the deadline is shared across every chunk *within* one call, but
-# word correction and shape labelling are separate calls with separate
-# deadlines — a single /process request that exercises both and has both time
-# out end to end can take up to 2x this budget. Rejected merging them into one
-# shared deadline: doing so needs pipeline/__init__.py (the caller, a stage
-# apart from this file) to own and pass a single deadline into both calls,
-# which is more machinery across a module boundary than this bug is worth.
-# Upgrade path: if that 2x ever matters in practice, have pipeline/__init__.py
-# compute one deadline and pass it into both apply_corrections(..., deadline=)
-# and label_complex_shapes(..., deadline=).
+#
+# Both functions take an optional `deadline` param. pipeline/__init__.py
+# computes ONE deadline before stage 6 and passes the same value into both
+# apply_corrections(..., deadline=) and label_complex_shapes(..., deadline=),
+# so a /process request that exercises both stages shares one
+# TOTAL_LLM_BUDGET_SECONDS budget end to end instead of paying it twice (was:
+# up to 120s worst case; now: up to 60s). `deadline=None` (the default) keeps
+# each function computing its own full-budget deadline, which is what every
+# test and any other single-stage caller still gets.
+#
+# See PER_ATTEMPT_CAP_SECONDS below for why sharing one deadline across both
+# stages is safe rather than letting whichever stage runs first (word
+# correction) starve the other of the whole budget.
 TOTAL_LLM_BUDGET_SECONDS = 60.0
 
 
@@ -125,6 +146,7 @@ def apply_corrections(
     elements: list[Element],
     image_bytes: bytes,
     confidence_threshold: float = 0.75,
+    deadline: float | None = None,
 ) -> tuple[list[Element], dict]:
     """Call OpenRouter LLM to correct low-confidence OCR words in the element list.
 
@@ -133,6 +155,10 @@ def apply_corrections(
     invalid model, malformed response) degrades gracefully to the original
     elements rather than failing the request, but unlike before, the caller can
     now tell *why* nothing changed instead of guessing.
+
+    deadline: a monotonic clock reading shared with another LLM call (see
+    TOTAL_LLM_BUDGET_SECONDS). None (the default) computes a fresh full-budget
+    deadline for this call alone, same as before this param existed.
     """
     flagged = [e for e in elements
                if isinstance(e, TextElement) and e.confidence < confidence_threshold]
@@ -163,13 +189,22 @@ def apply_corrections(
     last_status = _status("failed", "unknown")
     any_success = False
     # One deadline for every chunk in this call, not one per chunk — see the
-    # ponytail comment on TOTAL_LLM_BUDGET_SECONDS.
-    deadline = time.monotonic() + TOTAL_LLM_BUDGET_SECONDS
+    # comment on TOTAL_LLM_BUDGET_SECONDS. Also shared with label_complex_shapes
+    # when the caller passes one in (pipeline/__init__.py does).
+    if deadline is None:
+        deadline = time.monotonic() + TOTAL_LLM_BUDGET_SECONDS
+    # Models that already failed permanently on an earlier chunk of *this*
+    # call don't get retried on the next one — see _PERMANENT_FAILURE_REASONS.
+    # Local to this call, never module-level: a bad model must not stay
+    # blacklisted past the request that discovered it.
+    failed_models: dict[str, str] = {}
 
     for chunk in _chunks(flagged, MAX_WORDS_PER_CALL):
         content = _build_word_content(page, chunk)
         try:
-            corrections, chunk_status = _request_with_fallback(client, SYSTEM_PROMPT, content, deadline)
+            corrections, chunk_status = _request_with_fallback(
+                client, SYSTEM_PROMPT, content, deadline, failed_models,
+            )
             for item in corrections:
                 if isinstance(item, dict) and "index" in item and "corrected" in item:
                     i = int(item["index"])
@@ -213,6 +248,7 @@ def apply_corrections(
 def label_complex_shapes(
     elements: list[Element],
     crop_png_bytes: dict[str, bytes],
+    deadline: float | None = None,
 ) -> tuple[list[Element], dict]:
     """Ask the vision model what each complex shape crop depicts.
 
@@ -220,6 +256,10 @@ def label_complex_shapes(
     llm_label_certainty on ComplexShapeElements. Like word correction this is
     best-effort: a provider failure leaves the labels unset rather than failing
     the request, and the returned status says why.
+
+    deadline: a monotonic clock reading shared with another LLM call (see
+    TOTAL_LLM_BUDGET_SECONDS). None (the default) computes a fresh full-budget
+    deadline for this call alone, same as before this param existed.
 
     A floor plan repeats the same door swing / window / grid marker dozens of
     times, and shape labelling is the dominant cost of a request when it's
@@ -258,14 +298,23 @@ def label_complex_shapes(
     last_status = _status("failed", "unknown")
     any_success = False
     # One deadline for every chunk in this call, not one per chunk — see the
-    # ponytail comment on TOTAL_LLM_BUDGET_SECONDS.
-    deadline = time.monotonic() + TOTAL_LLM_BUDGET_SECONDS
+    # comment on TOTAL_LLM_BUDGET_SECONDS. Also shared with apply_corrections
+    # when the caller passes one in (pipeline/__init__.py does).
+    if deadline is None:
+        deadline = time.monotonic() + TOTAL_LLM_BUDGET_SECONDS
+    # Models that already failed permanently on an earlier chunk of *this*
+    # call don't get retried on the next one — see _PERMANENT_FAILURE_REASONS.
+    # Local to this call, never module-level: a bad model must not stay
+    # blacklisted past the request that discovered it.
+    failed_models: dict[str, str] = {}
 
     for start in range(0, len(representatives), MAX_CROPS_PER_CALL):
         chunk = representatives[start:start + MAX_CROPS_PER_CALL]
         content = _build_shape_content(chunk, crop_png_bytes)
         try:
-            raw, chunk_status = _request_with_fallback(client, SHAPE_PROMPT, content, deadline)
+            raw, chunk_status = _request_with_fallback(
+                client, SHAPE_PROMPT, content, deadline, failed_models,
+            )
             for item in raw:
                 if isinstance(item, dict) and "index" in item and "label" in item:
                     i = int(item["index"])
@@ -446,12 +495,33 @@ def _build_shape_content(chunk: list[ComplexShapeElement], crop_png_bytes: dict[
     return content
 
 
+# A model that fails with one of these reasons will fail the exact same way
+# on every later chunk of the same call — invalid_model (400/404, e.g. "this
+# model doesn't support image input") and unauthorized (401/403, bad key /
+# no permission) are properties of the (model, request) pair, not of the
+# payload or the moment in time. Retrying them per chunk (up to 6 chunks for
+# shape labelling) just burns PER_ATTEMPT_CAP_SECONDS for nothing.
+#
+# Deliberately NOT included: rate_limited, network, server_error, timed_out,
+# parse_error, empty_response, unknown. All of those are plausibly transient
+# or payload-dependent — a 429 can clear by the next chunk, a stalled
+# connection can recover, a model that garbled the JSON for one chunk's crops
+# might get the next chunk's right. Blacklisting on those would risk
+# permanently benching a model for one bad chunk within an otherwise-working
+# call, which is worse than the wasted retry this is meant to avoid.
+_PERMANENT_FAILURE_REASONS = frozenset({"invalid_model", "unauthorized"})
+
+
 def _request_with_fallback(client, system_prompt: str, user_content: list[dict],
-                            deadline: float) -> tuple[list[dict], dict]:
+                            deadline: float, failed_models: dict[str, str]) -> tuple[list[dict], dict]:
     """Try each configured model in order (primary, then fallbacks), retrying
     transient failures on each with backoff. Raises _LLMFailure if every model
     in the chain fails, or "timed_out" once `deadline` (a single monotonic
     clock reading shared across every chunk of the call this came from) passes.
+
+    failed_models is mutated in place: models that fail for a reason in
+    _PERMANENT_FAILURE_REASONS are recorded here (by the caller's chunk loop,
+    across calls to this function) and skipped without being retried.
     """
     models = _model_chain()
     last_reason = "unknown"
@@ -459,12 +529,21 @@ def _request_with_fallback(client, system_prompt: str, user_content: list[dict],
         if time.monotonic() >= deadline:
             logger.warning("LLM budget of %.0fs exhausted, giving up", TOTAL_LLM_BUDGET_SECONDS)
             raise _LLMFailure("timed_out")
+        if model in failed_models:
+            last_reason = failed_models[model]
+            logger.info(
+                "Skipping %s: already failed permanently (%s) earlier in this call",
+                model, last_reason,
+            )
+            continue
         try:
             content = _call_with_retry(client, model, system_prompt, user_content, deadline=deadline)
             parsed = _parse_json_array(content)
             return parsed, _status("success", None, model=model)
         except Exception as exc:
             last_reason = _classify_error(exc)
+            if last_reason in _PERMANENT_FAILURE_REASONS:
+                failed_models[model] = last_reason
             is_last = i == len(models) - 1
             logger.warning(
                 "LLM call to %s failed (%s: %s)%s",
@@ -496,6 +575,9 @@ def _call_with_retry(client, model: str, system_prompt: str, user_content: list[
     delay = BASE_BACKOFF_SECONDS
     for attempt in range(1, max_attempts + 1):
         remaining = (deadline - time.monotonic()) if deadline is not None else REQUEST_TIMEOUT_SECONDS
+        # Never hand one attempt more than PER_ATTEMPT_CAP_SECONDS, no matter
+        # how much budget is left — see the comment on that constant.
+        remaining = min(remaining, PER_ATTEMPT_CAP_SECONDS)
         if remaining <= 0:
             raise TimeoutError("LLM budget exhausted before attempt")
         try:

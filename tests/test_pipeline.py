@@ -12,6 +12,41 @@ FAKE_OCR_WORD = MagicMock(
 )
 
 
+@patch("pipeline.label_complex_shapes")
+@patch("pipeline.apply_corrections", return_value=([], NOT_ATTEMPTED))
+@patch("pipeline.detect_shapes")
+@patch("pipeline.run_ocr", return_value=[FAKE_OCR_WORD])
+@patch("pipeline.segment_layout", return_value=[])
+@patch("pipeline.preprocess", side_effect=lambda x: x)
+def test_word_correction_cannot_spend_the_whole_shared_llm_budget(
+    mock_pre, mock_layout, mock_ocr, mock_shapes, mock_llm, mock_labels
+):
+    """Both LLM stages share one budget, so word correction (which runs first)
+    could otherwise consume all of it and leave shape labelling nothing — that
+    was measured happening on 2 of 3 runs of a real 167-element page. Word
+    correction must be handed an earlier deadline than shape labelling."""
+    from pipeline import CORRECTION_BUDGET_SHARE
+    from pipeline.llm_corrector import TOTAL_LLM_BUDGET_SECONDS
+
+    complex_shape = MagicMock(
+        shape_type="complex", bbox_px={"x": 5, "y": 5, "w": 40, "h": 40},
+        confidence=0.7, crop=np.ones((40, 40, 3), dtype=np.uint8) * 128,
+    )
+    mock_shapes.return_value = [complex_shape]
+    mock_labels.return_value = ([], NOT_ATTEMPTED)
+
+    process_image(np.ones((400, 600, 3), dtype=np.uint8) * 255, label_shapes=True)
+
+    correction_deadline = mock_llm.call_args.kwargs["deadline"]
+    labelling_deadline = mock_labels.call_args.kwargs["deadline"]
+    assert correction_deadline < labelling_deadline, (
+        "word correction got the full shared budget; shape labelling can be starved"
+    )
+    reserved = labelling_deadline - correction_deadline
+    expected = TOTAL_LLM_BUDGET_SECONDS * (1 - CORRECTION_BUDGET_SHARE)
+    assert reserved == pytest.approx(expected, abs=1.0)
+
+
 @patch("pipeline.apply_corrections", return_value=([], NOT_ATTEMPTED))
 @patch("pipeline.detect_shapes", return_value=[])
 @patch("pipeline.run_ocr", return_value=[FAKE_OCR_WORD])
