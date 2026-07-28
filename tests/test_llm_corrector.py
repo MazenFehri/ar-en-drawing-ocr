@@ -5,7 +5,18 @@ from unittest.mock import patch, MagicMock
 from models.elements import TextElement, BBox, LLMCorrection, ComplexShapeElement
 from pipeline.llm_corrector import (
     apply_corrections, _build_prompt, label_complex_shapes, _call_with_retry,
+    _build_system_prompt, _chunk_language, _introduces_unseen_script,
 )
+
+# Same range utils.bidi.is_arabic/detect_language use to identify Arabic-block
+# characters. Tests assert against this range directly (not against specific
+# glossary words) so a test can't pass by accident while some other Arabic
+# term leaks through.
+_ARABIC_BLOCK = ("؀", "ۿ")
+
+
+def _has_any_arabic_char(text: str) -> bool:
+    return any(_ARABIC_BLOCK[0] <= c <= _ARABIC_BLOCK[1] for c in text)
 
 
 def _fake_page_bytes(w=200, h=200):
@@ -1046,4 +1057,141 @@ def test_context_enabled_no_container_is_silent_no_op(mock_client_fn):
 
     sent_text = [c["text"] for c in _sent_content(mock_client_fn.return_value) if c["type"] == "text"][0]
     assert "nearby_confident_labels" not in sent_text
+    assert status["state"] == "success"
+
+
+# --- adaptive system prompt: no Arabic priming on an all-English chunk -----
+# The measured bug: SYSTEM_PROMPT used to be one fixed constant with an Arabic
+# glossary baked in, sent for every correction call regardless of what was on
+# the page. On class-diagram.png (100% English UML diagram, zero Arabic
+# anywhere) the model corrected the flagged word 'a' to 'غرفة' at certainty
+# 1.00 -- copied straight out of that glossary. _build_system_prompt fixes
+# this by only including the glossary(ies) the chunk being sent has evidence
+# for.
+
+def test_all_english_chunk_prompt_has_no_arabic_characters_at_all():
+    """Assert on the Unicode character range, not on specific glossary words --
+    a test that only checked "غرفة" not in prompt would pass while every other
+    Arabic term (النوم، الصالة، المطبخ...) leaked through untested."""
+    chunk = [
+        make_text_el("t0", "a", 0.7),
+        make_text_el("t1", "Y 1..", 0.69),
+        make_text_el("t2", "0..", 0.71),
+    ]
+    prompt = _build_system_prompt(chunk)
+    assert not _has_any_arabic_char(prompt)
+    assert "english" in prompt.lower() or "bedroom" in prompt.lower()  # English glossary still present
+
+
+def test_all_english_chunk_prompt_survives_a_stray_arabic_indic_digit():
+    """Regression test for the exact live A/B scenario: PaddleOCR occasionally
+    misreads a Latin digit as its Arabic-Indic lookalike ('er١', ground truth
+    'user') even on an all-English page. A single stray digit in one flagged
+    word must not be enough to re-invite the Arabic glossary for the whole
+    chunk -- that's exactly the crack the old unconditional prompt (and a
+    naive per-word ratio check) fell through."""
+    chunk = [
+        make_text_el("t0", "a", 0.72),
+        make_text_el("t1", "er١", 0.71),
+        make_text_el("t2", "Y 1..", 0.69),
+        make_text_el("t3", "0..", 0.71),
+    ]
+    prompt = _build_system_prompt(chunk)
+    assert not _has_any_arabic_char(prompt)
+    assert _chunk_language(chunk) == "english"
+
+
+def test_arabic_chunk_still_gets_arabic_glossary():
+    """Today's behaviour (Arabic glossary present) is correct for a genuinely
+    Arabic chunk -- this must not regress."""
+    chunk = [make_text_el("t0", "غرفه", 0.5)]  # low-confidence misspelling
+    prompt = _build_system_prompt(chunk)
+    assert _has_any_arabic_char(prompt)
+    assert "غرفة النوم" in prompt  # the Arabic glossary itself
+
+
+def test_mixed_chunk_gets_both_glossaries():
+    chunk = [make_text_el("t0", "entrnce", 0.4), make_text_el("t1", "غرفه", 0.3)]
+    prompt = _build_system_prompt(chunk)
+    assert _has_any_arabic_char(prompt)
+    assert "bedroom" in prompt.lower()
+    assert _chunk_language(chunk) == "mixed"
+
+
+def test_prompt_always_includes_script_preservation_rule():
+    chunk = [make_text_el("t0", "entrnce", 0.4)]
+    prompt = _build_system_prompt(chunk)
+    assert "script" in prompt.lower()
+
+
+# --- response-side defense: reject a correction that hallucinates a script -
+# the chunk gave zero evidence for -----------------------------------------
+
+def test_introduces_unseen_script_rejects_arabic_on_english_chunk():
+    """The exact measured shape of the bug: certainty 1.00, corrected text is
+    Arabic, chunk had no Arabic evidence at all."""
+    assert _introduces_unseen_script("english", "غرفة") is True
+
+
+def test_introduces_unseen_script_allows_arabic_on_mixed_chunk():
+    """Once the chunk has real Arabic evidence somewhere, script alone can no
+    longer distinguish a real Arabic correction from a hallucinated one --
+    this must not reject."""
+    assert _introduces_unseen_script("mixed", "غرفة") is False
+
+
+def test_introduces_unseen_script_allows_latin_on_arabic_chunk():
+    """Deliberately NOT symmetric -- see _introduces_unseen_script's docstring.
+    An Arabic-classified chunk correcting a misread into Latin characters (or
+    a Latin unit like '3.5m' embedded in an Arabic label) must go through:
+    OCR misreading real Arabic as Latin garbage and correction fixing it back
+    is exactly the legitimate case this must not break."""
+    assert _introduces_unseen_script("arabic", "user") is False
+    assert _introduces_unseen_script("arabic", "3.5m") is False
+
+
+def test_introduces_unseen_script_allows_english_correction_on_english_chunk():
+    assert _introduces_unseen_script("english", "entrance") is False
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_hallucinated_arabic_correction_is_discarded_on_english_chunk(mock_client_fn):
+    """End-to-end version of the measured bug: an all-English chunk, and the
+    model answers with Arabic anyway (glossary bleed, general hallucination,
+    doesn't matter which) -- the correction must be discarded, original OCR
+    text kept, no llm_correction attached, exactly like any other rejected
+    answer."""
+    mock_client_fn.return_value = _mock_client(
+        '[{"index": 0, "corrected": "غرفة", "certainty": 1.0}]'
+    )
+
+    result, status = apply_corrections([make_text_el("t0", "a", 0.72)], FAKE_PAGE, confidence_threshold=0.75)
+
+    assert result[0].content == "a"
+    assert result[0].llm_correction is None
+    assert result[0].highlight is None
+    assert status["state"] == "success"  # the LLM call itself succeeded; only the answer was rejected
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_legitimate_arabic_correction_on_mixed_chunk_is_applied(mock_client_fn):
+    """Sanity check that the defensive check doesn't overreach: a mixed chunk
+    (one English word, one genuinely Arabic word) correcting the Arabic word
+    to a different, still-Arabic reading must go through unrejected."""
+    elements = [
+        make_text_el("t0", "entrnce", 0.4),
+        make_text_el("t1", "غرفه", 0.3),  # low-confidence misspelling
+    ]
+    resp = (
+        '[{"index": 0, "corrected": "entrance", "certainty": 0.9}, '
+        '{"index": 1, "corrected": "غرفة", "certainty": 0.85}]'
+    )
+    mock_client_fn.return_value = _mock_client(resp)
+
+    result, status = apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+
+    by_id = {e.id: e for e in result}
+    assert by_id["t1"].llm_correction.corrected == "غرفة"
     assert status["state"] == "success"

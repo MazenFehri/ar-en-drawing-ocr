@@ -7,6 +7,7 @@ import time
 import cv2
 import numpy as np
 from models.elements import TextElement, ComplexShapeElement, LLMCorrection, Element, BBox
+from utils.bidi import is_arabic
 
 logger = logging.getLogger(__name__)
 
@@ -16,14 +17,150 @@ reference, toilet, sink, bath, bed, sofa, dining table, car, tree, elevation mar
 Each image below is one cropped symbol, given in order.
 Return ONLY a JSON array, one entry per image, no explanation:
 [{"index": 0, "label": "door swing", "certainty": 0.0}]"""
+# Checked this prompt for the same defect as the correction prompt below
+# (unconditional Arabic priming) and it doesn't have it: there's no Arabic
+# anywhere in it, and a shape label is a category name ("door swing"), not a
+# script-sensitive transcription of what's in the crop -- there's nothing
+# here for a script to leak from. Left unchanged.
 
 _client_instance = None
 
-SYSTEM_PROMPT = """You are an expert in Arabic and English architectural drawing OCR correction.
-Common terms — Arabic: غرفة النوم (bedroom), الصالة (living room), المطبخ (kitchen),
-الحمام (bathroom), المدخل (entrance), الفناء (courtyard), الرواق (corridor), الدرج (stairs).
-English: bedroom, bathroom, kitchen, entrance, corridor, living room, dining room, parking, balcony.
-Return ONLY a valid JSON array, no explanation."""
+# --- word-correction system prompt: built per chunk, not one fixed constant ---
+# Used to be a single module-level SYSTEM_PROMPT sent unchanged for every
+# correction call, Arabic glossary and all, no matter what was on the page.
+# Measured on class-diagram.png (a 100% English UML diagram, zero Arabic
+# anywhere): the model corrected the single flagged word 'a' to 'غرفة' at
+# certainty 1.00 -- 'غرفة' appears verbatim in the glossary below. It wasn't
+# reading the crop, it was copying our own prompt. _build_system_prompt below
+# only includes the glossary(ies) the chunk being sent actually has evidence
+# for.
+_CORRECTION_PROMPT_INTRO = (
+    "You are an expert in Arabic and English architectural drawing OCR correction."
+)
+
+_ARABIC_GLOSSARY = (
+    "Common terms — Arabic: غرفة النوم (bedroom), الصالة (living room), المطبخ (kitchen), "
+    "الحمام (bathroom), المدخل (entrance), الفناء (courtyard), الرواق (corridor), الدرج (stairs)."
+)
+
+_ENGLISH_GLOSSARY = (
+    "Common terms — English: bedroom, bathroom, kitchen, entrance, corridor, living room, "
+    "dining room, parking, balcony."
+)
+# ponytail: still floor-plan vocabulary (bedroom/kitchen/corridor) on a pipeline
+# used for technical drawings generally -- class-diagram.png is full of
+# id_transaction/band_amount/+created_at, none of which this glossary helps
+# with. Not touched here: the ask was to stop *unconditional Arabic* priming,
+# not to fix the English glossary's domain, and swapping it for something
+# UML-flavoured would just as narrowly overfit the next non-floor-plan page.
+# Upgrade path: drop the glossary to a handful of script/format examples
+# instead of domain vocabulary, or drop it entirely and lean on the crop +
+# _SCRIPT_RULE alone.
+
+# Requirement: an explicit rule about the reading, not an enumerated
+# forbidden-character list -- phrased as "what script does the crop actually
+# show", which is the question the model can actually answer by looking.
+_SCRIPT_RULE = (
+    "Each cropped word is written in exactly one script. Read only the characters "
+    "actually visible in that crop: a word written in Latin letters must be read back "
+    "in Latin letters, and a word written in Arabic must be read back in Arabic. Do not "
+    "borrow letters or digits from the other script, and do not let the glossary above "
+    "influence your reading unless the crop genuinely shows one of those words."
+)
+
+
+def _has_arabic_letters(text: str) -> bool:
+    """True if `text` has an Arabic-block character that ISN'T an Arabic-Indic
+    digit (٠-٩, U+0660-0669, or the Persian/Urdu variant U+06F0-06F9).
+
+    Narrower than utils.bidi.is_arabic/detect_language, which count those
+    digits as Arabic characters -- correct for their own job (bidi reordering,
+    ratio-classifying a full line) but the wrong signal for "does this word
+    contain Arabic vocabulary". PaddleOCR occasionally misreads a Latin digit
+    as its Arabic-Indic lookalike on an all-English page (the flagged word
+    'er١' on class-diagram.png -- ground truth 'user' per a separate English-
+    model OCR run); is_arabic's >30%-of-string threshold trips on that single
+    stray digit in a 3-character word. Excluding the digit ranges here is what
+    keeps that word from swinging a whole chunk's language classification.
+    """
+    return any(
+        "؀" <= c <= "ۿ"
+        and not ("٠" <= c <= "٩")
+        and not ("۰" <= c <= "۹")
+        for c in text
+    )
+
+
+def _chunk_language(chunk: list[TextElement]) -> str:
+    """'english' / 'arabic' / 'mixed' for the whole batch of flagged words in
+    one call -- decides which glossary(ies) _build_system_prompt sends, and
+    gates _introduces_unseen_script below.
+
+    Deliberately NOT TextElement.language (set by layout_reconstructor's own
+    detect_language(word.text) at OCR time) and not utils.bidi.detect_language
+    re-run on this text either. Both are ratio-based over a single string, and
+    the words landing here are, almost by definition, the short/garbled ones
+    OCR wasn't confident about -- exactly where one stray character can cross
+    a 30% threshold (see _has_arabic_letters). Voting _has_arabic_letters per
+    word and combining across the whole chunk sidesteps that: one noisy short
+    word can't flip the whole chunk to "contains Arabic", and a genuinely
+    Arabic word isn't diluted away just because it's outnumbered by English
+    words in the same batch (concatenating the chunk into one string and
+    running detect_language on that was tried and rejected for exactly this
+    reason -- a short real Arabic word can still lose a ratio vote against
+    several longer English ones in the same chunk).
+    """
+    has_arabic = any(_has_arabic_letters(e.content) for e in chunk)
+    has_english = any(c.isalpha() and ord(c) < 128 for e in chunk for c in e.content)
+    if has_arabic and has_english:
+        return "mixed"
+    if has_arabic:
+        return "arabic"
+    return "english"  # also covers a chunk with no letters at all (e.g. all-digit OCR guesses)
+
+
+def _build_system_prompt(chunk: list[TextElement]) -> str:
+    lang = _chunk_language(chunk)
+    parts = [_CORRECTION_PROMPT_INTRO]
+    if lang in ("arabic", "mixed"):
+        parts.append(_ARABIC_GLOSSARY)
+    if lang in ("english", "mixed"):
+        parts.append(_ENGLISH_GLOSSARY)
+    parts.append(_SCRIPT_RULE)
+    parts.append("Return ONLY a valid JSON array, no explanation.")
+    return "\n".join(parts)
+
+
+def _introduces_unseen_script(chunk_lang: str, corrected: str) -> bool:
+    """Response-side backstop for the exact failure measured on
+    class-diagram.png: _SCRIPT_RULE is a request, not a guarantee, and the
+    model followed the old prompt's Arabic glossary into an unrelated English
+    crop's answer at certainty 1.00. Only rejects when the WHOLE chunk was
+    classified "english" (no Arabic evidence anywhere in the batch sent -- see
+    _chunk_language) and the correction contains Arabic. Two deliberate
+    limits, both there to avoid discarding a real correction:
+
+    1. Skipped for "mixed" chunks. Once the batch has genuine Arabic content
+       somewhere, script alone can no longer distinguish "this correction is
+       real Arabic" from "this correction is hallucinated Arabic" -- so this
+       stops second-guessing and the model is trusted, same as before this
+       change existed.
+
+    2. Deliberately NOT symmetric: an "arabic"-classified chunk coming back
+       with Latin characters is never rejected. Arabic architectural labels
+       routinely carry embedded Latin digits/units ("3.5m" -- see
+       utils/bidi.py's _LTR_RUN comment), so a legitimate correction can need
+       to add or fix Latin characters inside what started as an Arabic
+       reading -- and OCR misreading real Arabic as Latin garbage is exactly
+       the case correction exists to fix (an all-Arabic chunk producing an
+       all-Latin correction would still go through). Guarding that direction
+       too, with no live evidence of it actually happening, risks silently
+       eating a correct answer to prevent a bug that was never observed.
+       Only the direction with live evidence ('a' -> 'غرفة' at 1.00,
+       'er١' -> '١م' at 0.71, 'Y 1..' -> '١..' at 0.69, all on a page with
+       zero real Arabic) is guarded.
+    """
+    return chunk_lang == "english" and is_arabic(corrected)
 
 # A page with many flagged words / crops can produce a payload large enough for a
 # free-tier model to reject outright, which looks identical to a rate limit or a
@@ -197,6 +334,12 @@ def apply_corrections(
     # is how the model tells us *which* image an answer belongs to; id is how we
     # turn that back into the right element regardless of duplicate content.
     correction_by_id: dict[str, dict] = {}
+    # Which chunk-level script classification (see _chunk_language) produced
+    # each correction — needed at apply-time below to run
+    # _introduces_unseen_script against the same "english"/"arabic"/"mixed"
+    # verdict the prompt itself was built from, not a value recomputed later
+    # from possibly-already-corrected content.
+    chunk_lang_by_id: dict[str, str] = {}
     last_status = _status("failed", "unknown")
     any_success = False
     # One deadline for every chunk in this call, not one per chunk — see the
@@ -211,16 +354,18 @@ def apply_corrections(
     failed_models: dict[str, str] = {}
 
     for chunk in _chunks(flagged, MAX_WORDS_PER_CALL):
+        chunk_lang = _chunk_language(chunk)
         content = _build_word_content(page, chunk, sibling_context_by_id)
         try:
             corrections, chunk_status = _request_with_fallback(
-                client, SYSTEM_PROMPT, content, deadline, failed_models,
+                client, _build_system_prompt(chunk), content, deadline, failed_models,
             )
             for item in corrections:
                 if isinstance(item, dict) and "index" in item and "corrected" in item:
                     i = int(item["index"])
                     if 0 <= i < len(chunk):
                         correction_by_id[chunk[i].id] = item
+                        chunk_lang_by_id[chunk[i].id] = chunk_lang
             last_status = chunk_status
             any_success = True
         except _LLMFailure as exc:
@@ -241,12 +386,23 @@ def apply_corrections(
         # An empty "corrected" value is the model failing to answer, not a real
         # correction — applying it would silently blank out real OCR text.
         if corr_data and corr_data.get("corrected") and corr_data["corrected"] != el.content:
+            corrected_text = corr_data["corrected"]
+            # See _introduces_unseen_script: the prompt already told the model
+            # not to do this (_SCRIPT_RULE), this is the backstop for when it
+            # ignores that instruction.
+            if _introduces_unseen_script(chunk_lang_by_id.get(el.id), corrected_text):
+                logger.info(
+                    "Discarding correction for %s: %r -> %r introduces a script this "
+                    "chunk's OCR gave no evidence for", el.id, el.content, corrected_text,
+                )
+                updated.append(el)
+                continue
             certainty = corr_data.get("certainty", 0.0)
             updated.append(el.model_copy(update={
-                "content": corr_data["corrected"],
+                "content": corrected_text,
                 "llm_correction": LLMCorrection(
                     original=el.content,
-                    corrected=corr_data["corrected"],
+                    corrected=corrected_text,
                     certainty=certainty,
                 ),
                 "highlight": "yellow" if certainty >= 0.60 else "red",
