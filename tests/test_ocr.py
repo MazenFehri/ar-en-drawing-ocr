@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
-from pipeline.ocr import run_ocr, OcrWord
+from pipeline.ocr import run_ocr, OcrWord, _LANG_MODELS
 
 MOCK_PADDLE_RESULT = [[
     [[[10, 20], [110, 20], [110, 45], [10, 45]], ("غرفة النوم", 0.92)],
@@ -46,3 +46,13 @@ def test_empty_result(mock_get_ocr):
     mock_get_ocr.return_value = mock_ocr
     words = run_ocr(np.ones((200, 300, 3), dtype=np.uint8) * 255)
     assert words == []
+
+def test_en_hint_maps_to_english_model_not_arabic():
+    # Regression guard for the language_hint=en 500 (root cause was a missing
+    # runtime download of a model that only "en" needs, not a mapping bug —
+    # but the tempting quick "fix" is to silently route "en" through the
+    # already-working arabic model, which would mask the bug rather than fix
+    # it). Only "en" should resolve to the dedicated english model.
+    assert _LANG_MODELS["en"] == "en"
+    assert _LANG_MODELS["ar"] == "arabic"
+    assert _LANG_MODELS["ar+en"] == "arabic"

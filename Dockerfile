@@ -26,11 +26,33 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download PaddleOCR Arabic model to avoid cold-start delay. Run as
-# appuser so the cache lands in /home/appuser/.paddleocr — the same place the
-# runtime user will read it from.
 USER appuser
-RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='arabic', show_log=False)" || true
+
+# Create the model cache dir as appuser BEFORE anything tries to populate it,
+# independent of whether the downloads below succeed. This is the part that
+# actually prevents the PermissionError class of bug: if this path doesn't
+# exist in the image at all, Docker auto-vivifies the paddle_models volume
+# mountpoint (docker-compose.yml) as root on first use, and a from-scratch
+# runtime model download hits Permission denied instead of self-healing.
+RUN mkdir -p /home/appuser/.paddleocr
+
+# Pre-download PaddleOCR models to avoid cold-start delay AND to avoid a
+# runtime download entirely: /process?language_hint=en selects the separate
+# "en" model (see pipeline/ocr.py _LANG_MODELS), so it must be baked in here
+# too or that request downloads-on-demand the first time anyone picks it.
+# Retried a few times: constructing PaddleOCR() has been observed to
+# SIGABRT/SIGSEGV intermittently in a short-lived one-shot process on some
+# hosts (paddle's native init appears to dislike a fresh interpreter that
+# exits right after) even though it's solid inside the long-running uvicorn
+# server. `|| true` either way — a failed bake isn't fatal, it just means the
+# first real request downloads instead, which now works because of the mkdir
+# above.
+# ponytail: retry-and-shrug is the ceiling here, not a real fix for the
+# native-init flakiness. If bakes keep failing in prod, the upgrade path is
+# fetching+extracting the model tarballs directly (bypassing `import paddle`
+# for the download) instead of going through PaddleOCR()'s own downloader.
+RUN for i in 1 2 3; do python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='arabic', show_log=False)" && break; done || true
+RUN for i in 1 2 3; do python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='en', show_log=False)" && break; done || true
 
 USER root
 COPY . .

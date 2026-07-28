@@ -14,7 +14,16 @@ services:
     volumes:
       # Persist downloaded PaddleOCR / PPStructure models across rebuilds so the
       # slow first-request model download only happens once. Must match the
-      # non-root `appuser` home directory baked into the Dockerfile.
+      # non-root `appuser` home directory baked into the Dockerfile, and the
+      # Dockerfile must `mkdir` that path as appuser before this volume's first
+      # mount — an empty/absent path here gets auto-vivified by Docker as
+      # root-owned, which breaks every runtime model download permanently
+      # (see Dockerfile comment above the mkdir).
+      #
+      # If you're recreating this volume by hand (e.g. it predates the mkdir
+      # fix and is stuck root-owned): `docker compose rm -sf ocr-api && docker
+      # volume rm ocrtask_paddle_models && docker compose up -d --build
+      # ocr-api`. Do NOT `docker compose down -v` — that also drops `pgdata`.
       - paddle_models:/home/appuser/.paddleocr
     depends_on:
       db:
