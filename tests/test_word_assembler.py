@@ -44,6 +44,34 @@ def test_assemble_with_complex_shape_crop():
     assert isinstance(result, bytes)
 
 
+def _relative_heights(docx_bytes):
+    """relativeHeight per anchor, in document order."""
+    doc = Document(io.BytesIO(docx_bytes))
+    xml = doc.element.body.xml
+    return [int(v) for v in re.findall(r'relativeHeight="(\d+)"', xml)]
+
+
+def test_text_stacks_above_shapes_and_images():
+    """A label inside a box must read on top of it. Every anchor used to carry
+    the same relativeHeight, so stacking fell back to document order — and
+    reconstruct_layout emits text first, graphics second, which painted the
+    shape over the text and hid it. Graphics must sit in a lower band.
+    """
+    crop = np.ones((50, 80, 3), dtype=np.uint8) * 128
+    # Deliberately in the order reconstruct_layout produces: text, then graphics.
+    elements = [
+        make_text_el("t0", "kitchen", x=0.32, y=0.22),
+        SimpleShapeElement(id="s0", bbox=BBox(x=0.3, y=0.2, w=0.3, h=0.2),
+                           shape="rect", confidence=0.93),
+        ComplexShapeElement(id="cs0", bbox=BBox(x=0.3, y=0.2, w=0.3, h=0.2)),
+    ]
+    heights = _relative_heights(assemble_document(elements, crop_images={"cs0": crop}))
+    assert len(heights) == 3, f"expected one anchor per element, got {heights}"
+    text_z, shape_z, image_z = heights
+    assert text_z > shape_z, "shape would paint over the text inside it"
+    assert text_z > image_z, "embedded image would paint over the text inside it"
+
+
 def test_assemble_arabic_text():
     elements = [make_text_el("t0", "غرفة النوم", lang="arabic")]
     result = assemble_document(elements, crop_images={})

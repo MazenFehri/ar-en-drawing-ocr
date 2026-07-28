@@ -61,6 +61,16 @@ _WORD_SHAPE = {
 
 _HIGHLIGHT_MAP = {"yellow": "yellow", "red": "red"}
 
+# Every anchor used to carry the same relativeHeight, which left stacking order
+# up to document order — and reconstruct_layout emits text first, shapes second,
+# so a shape whose bbox enclosed a label was painted *over* that label and hid
+# it. Text inside a shape has to read on top of it, so give the graphics a lower
+# band than the text and stop relying on list order for something this visible.
+# The values are arbitrary but must keep their relative order; Word writes
+# numbers in this range itself.
+_Z_GRAPHIC = 251658240
+_Z_TEXT = 251659264
+
 
 def assemble_document(
     elements: list[Element],
@@ -177,12 +187,13 @@ def _next_id(_counter: Iterator[int]) -> int:
     return next(_counter)
 
 
-def _anchor_wrap(left: int, top: int, cx: int, cy: int, inner_xml: str, _counter: Iterator[int]) -> str:
+def _anchor_wrap(left: int, top: int, cx: int, cy: int, inner_xml: str, _counter: Iterator[int],
+                 z: int = _Z_TEXT) -> str:
     eid = _next_id(_counter)
     return (
         '<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
         '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
-        'relativeHeight="251659264" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1" '
+        f'relativeHeight="{z}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1" '
         'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
         '<wp:simplePos x="0" y="0"/>'
         f'<wp:positionH relativeFrom="page"><wp:posOffset>{left}</wp:posOffset></wp:positionH>'
@@ -269,6 +280,7 @@ def _shape_xml(prst: str, left: int, top: int, cx: int, cy: int, _counter: Itera
         '</a:graphicData>'
         '</a:graphic>',
         _counter,
+        z=_Z_GRAPHIC,
     )
 
 
@@ -332,4 +344,5 @@ def _image_xml(doc: Document, img_bytes: bytes, left: int, top: int, cx: int, cy
         '</a:graphicData>'
         '</a:graphic>',
         _counter,
+        z=_Z_GRAPHIC,
     )
