@@ -1,4 +1,6 @@
-from models.elements import BBox, TextElement, SimpleShapeElement, ComplexShapeElement, Element
+from models.elements import (
+    BBox, TextElement, SimpleShapeElement, PolylineShapeElement, ComplexShapeElement, Element,
+)
 from pipeline.ocr import OcrWord
 from pipeline.shape_detector import ShapeResult
 from utils.bidi import detect_language, is_arabic, to_logical_order
@@ -32,6 +34,15 @@ def reconstruct_layout(
         bbox = to_relative_bbox(shape.bbox_px, image_width, image_height)
         if shape.shape_type == "complex":
             elements.append(ComplexShapeElement(id=f"shape_{j:03d}", bbox=bbox))
+        elif shape.shape_type == "polyline":
+            elements.append(PolylineShapeElement(
+                id=f"shape_{j:03d}",
+                bbox=bbox,
+                # Already fractions of the shape's own bbox (see shape_detector.
+                # _polyline_points), so the px -> relative step doesn't touch them.
+                points=list(shape.points or []),
+                confidence=shape.confidence,
+            ))
         else:
             elements.append(SimpleShapeElement(
                 id=f"shape_{j:03d}",

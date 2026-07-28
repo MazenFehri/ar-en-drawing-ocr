@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 import pytest
-from pipeline.shape_detector import detect_shapes, ShapeResult
+from pipeline.shape_detector import detect_shapes, ShapeResult, _classify
 
 MIN_TEST_AREA = 400  # Must match the module's MIN_AREA_PX
 
@@ -211,6 +211,77 @@ def test_text_inside_complex_shape_not_baked_into_crop():
 
     # detect_shapes must not mutate the caller's image while building the crop source.
     assert np.array_equal(img, original)
+
+
+def _ink_contour(h, w):
+    """Contour of a solid h x w ink block, as detect_shapes would find it."""
+    binary = np.zeros((h + 20, w + 20), dtype=np.uint8)
+    binary[10:10 + h, 10:10 + w] = 255
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return contours[0]
+
+
+@pytest.mark.parametrize("h,w", [(1, 300), (300, 1), (2, 300), (5, 300)])
+def test_thin_stroke_is_a_line_not_a_raster(h, w):
+    # A perfectly thin axis-aligned stroke makes cv2.minAreaRect report a short side of
+    # exactly 0.0. The old `short_side > 0` guard then skipped the line test entirely and
+    # the hairline fell through to "complex" — i.e. got embedded as a picture one pixel
+    # tall. The 2px/5px cases are here so the fix doesn't regress what already worked.
+    shape_type, confidence = _classify(_ink_contour(h, w))
+    assert shape_type == "line", f"{w}x{h} stroke classified as {shape_type}"
+    assert confidence == 0.9
+
+
+def test_hairline_end_to_end_is_a_line():
+    img = make_canvas()
+    cv2.line(img, (20, 150), (280, 150), (0, 0, 0), 1)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    assert [s.shape_type for s in shapes] == ["line"]
+    assert shapes[0].crop is None  # no raster embedding for a line
+
+
+def test_open_elbow_is_a_polyline_with_points():
+    # An L-shaped connector: an open stroke, so the contour traces out and back and
+    # encloses ~no area. There was no shape type for that, so it became a raster image.
+    img = make_canvas(400, 400)
+    pts = np.array([[50, 50], [50, 300], [350, 300]], np.int32)
+    cv2.polylines(img, [pts], isClosed=False, color=(0, 0, 0), thickness=2)
+
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    polylines = [s for s in shapes if s.shape_type == "polyline"]
+    assert len(polylines) == 1, [s.shape_type for s in shapes]
+
+    poly = polylines[0]
+    assert poly.crop is None  # a path, not a picture
+    assert poly.points is not None and len(poly.points) >= 3
+    # Points are fractions of the shape's own bbox, so they survive px -> relative -> EMU.
+    assert all(0.0 <= px <= 1.0 and 0.0 <= py <= 1.0 for px, py in poly.points)
+    # The elbow corner (bottom-left of the bbox) must actually be in the path.
+    assert any(px < 0.15 and py > 0.85 for px, py in poly.points)
+
+
+def test_curved_open_stroke_is_a_polyline():
+    img = make_canvas(400, 400)
+    curve = np.array(
+        [[40 + i * 6, int(200 + 140 * np.sin(i / 55.0 * np.pi))] for i in range(55)],
+        np.int32,
+    )
+    cv2.polylines(img, [curve], isClosed=False, color=(0, 0, 0), thickness=2)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    assert any(s.shape_type == "polyline" for s in shapes), [s.shape_type for s in shapes]
+
+
+def test_filled_blob_still_rasterised():
+    # The other half of the fix: raster embedding must survive for genuinely image-like
+    # regions. A solid, high-extent blob is not a stroke and must still get a crop.
+    img = make_canvas(400, 400)
+    pts = np.array([[200, 50], [320, 150], [300, 300], [150, 350], [80, 200]], np.int32)
+    cv2.fillPoly(img, [pts], (0, 0, 0))
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    assert len(shapes) == 1
+    assert shapes[0].shape_type == "complex"
+    assert shapes[0].crop is not None
+    assert shapes[0].points is None
 
 
 def test_residual_ink_produces_complex_shape():

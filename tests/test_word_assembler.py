@@ -3,8 +3,10 @@ import re
 import numpy as np
 import pytest
 from docx import Document
-from models.elements import BBox, TextElement, SimpleShapeElement, ComplexShapeElement
-from pipeline.word_assembler import assemble_document, _page_geometry
+from models.elements import (
+    BBox, TextElement, SimpleShapeElement, PolylineShapeElement, ComplexShapeElement,
+)
+from pipeline.word_assembler import assemble_document, _page_geometry, _Z_GRAPHIC, _PATH_SPACE
 
 
 def make_text_el(id_, text, x=0.1, y=0.05, lang="english", highlight=None):
@@ -137,6 +139,84 @@ def test_degenerate_point_still_gets_a_visible_floor():
     cx, cy = _last_extent(result)
     assert cx == 91_440
     assert cy == 91_440
+
+
+def _polyline_el(points, id_="p0"):
+    return PolylineShapeElement(
+        id=id_, bbox=BBox(x=0.1, y=0.1, w=0.4, h=0.3), points=points, confidence=0.8,
+    )
+
+
+def test_polyline_is_a_vector_freeform_not_a_picture():
+    # The user-visible bug: connector lines were rasterised. A polyline must come out as
+    # a real DrawingML freeform (a:custGeom with an a:path of a:lnTo points), so it stays
+    # editable vector art in Word — never a <pic:pic>.
+    result = assemble_document([_polyline_el([(0.0, 0.0), (0.0, 1.0), (1.0, 1.0)])],
+                               crop_images={})
+    doc = Document(io.BytesIO(result))
+    xml = doc.paragraphs[0].runs[0]._r.xml
+    assert "<a:custGeom>" in xml
+    assert "<a:prstGeom" not in xml
+    assert "<pic:pic" not in xml
+    assert xml.count("<a:moveTo>") == 1
+    assert xml.count("<a:lnTo>") == 2
+    # Open path: closing it would draw a phantom chord back to the start.
+    assert "<a:close/>" not in xml
+
+
+def test_polyline_points_map_into_the_path_coordinate_space():
+    result = assemble_document([_polyline_el([(0.0, 0.0), (0.5, 0.25), (1.0, 1.0)])],
+                               crop_images={})
+    doc = Document(io.BytesIO(result))
+    xml = doc.paragraphs[0].runs[0]._r.xml
+    pts = re.findall(r'<a:pt x="(\d+)" y="(\d+)"/>', xml)
+    assert pts == [
+        ("0", "0"),
+        (str(_PATH_SPACE // 2), str(_PATH_SPACE // 4)),
+        (str(_PATH_SPACE), str(_PATH_SPACE)),
+    ]
+    assert f'<a:path w="{_PATH_SPACE}" h="{_PATH_SPACE}" fill="none">' in xml
+
+
+def test_polyline_is_outline_only_and_sits_below_text():
+    result = assemble_document(
+        [_polyline_el([(0.0, 0.0), (1.0, 1.0)]), make_text_el("t0", "label")],
+        crop_images={},
+    )
+    doc = Document(io.BytesIO(result))
+    xml = doc.paragraphs[0].runs[0]._r.xml
+    # Same outline-only styling as the preset shapes; schema order noFill then ln.
+    assert re.search(r"</a:custGeom>\s*<a:noFill/>\s*<a:ln", xml)
+    assert 'srgbClr val="000000"' in xml
+    # Graphics z-band, so text still reads on top (deliberate earlier fix).
+    heights = _relative_heights(result)
+    assert heights[0] == _Z_GRAPHIC
+    assert heights[1] > _Z_GRAPHIC
+
+
+def test_polyline_with_too_few_points_is_skipped_not_emitted_broken():
+    # A one-point "path" has nothing to draw; emitting a custGeom with a lone moveTo
+    # would be a shape Word can't render. Skip it rather than write junk.
+    result = assemble_document([_polyline_el([(0.5, 0.5)])], crop_images={})
+    doc = Document(io.BytesIO(result))
+    assert "<a:custGeom>" not in doc.element.body.xml
+
+
+def test_polyline_document_is_valid_zip_and_xml():
+    # A malformed a:custGeom makes Word refuse the whole file, so validate rather
+    # than assume.
+    import zipfile
+    from lxml import etree as ET
+
+    elements = [
+        _polyline_el([(0.0, 0.0), (0.2, 0.9), (0.7, 0.1), (1.0, 1.0)], id_="p0"),
+        _polyline_el([(0.0, 1.0), (1.0, 0.0)], id_="p1"),
+        make_text_el("t0", "connector label"),
+    ]
+    result = assemble_document(elements, crop_images={}, page_aspect=1.4)
+    zf = zipfile.ZipFile(io.BytesIO(result))
+    assert zf.testzip() is None
+    ET.fromstring(zf.read("word/document.xml"))
 
 
 def test_page_geometry_none_matches_legacy_constants():

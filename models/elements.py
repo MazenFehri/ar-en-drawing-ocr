@@ -41,6 +41,25 @@ class SimpleShapeElement(BaseModel):
     confidence: float
 
 
+class PolylineShapeElement(BaseModel):
+    """An open stroke — a connector, leader or curved association line.
+
+    Distinct from SimpleShapeElement because there is no DrawingML preset geometry for
+    "arbitrary path": pipeline/word_assembler.py emits it as an a:custGeom freeform, so
+    it stays a real vector shape in Word instead of a raster picture. Distinct from
+    ComplexShapeElement because it is line art, not an image — raster embedding is
+    reserved for genuinely image-like regions (a photo, a logo, a textured blob).
+
+    points: the path as (x, y) fractions of this element's own bbox, in draw order.
+    """
+    id: str
+    type: Literal["polyline_shape"] = "polyline_shape"
+    bbox: BBox
+    shape: Literal["polyline"] = "polyline"
+    points: list[tuple[float, float]]
+    confidence: float
+
+
 class ComplexShapeElement(BaseModel):
     id: str
     type: Literal["complex_shape"] = "complex_shape"
@@ -51,4 +70,4 @@ class ComplexShapeElement(BaseModel):
     llm_label_certainty: Optional[float] = None
 
 
-Element = Union[TextElement, SimpleShapeElement, ComplexShapeElement]
+Element = Union[TextElement, SimpleShapeElement, PolylineShapeElement, ComplexShapeElement]

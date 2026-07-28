@@ -9,6 +9,18 @@ MIN_DIAGONAL_PX = 60  # ...unless the bbox diagonal alone says it's a real (thin
 LINE_ASPECT_RATIO = 8.0  # minAreaRect long/short side above this => "line"
 LINE_MAX_THICKNESS_PX = 12  # ...and the short side must actually be thin
 
+# An open stroke (connector, leader, curved association line) is traced out and back,
+# so the contour encloses essentially no area. Measured on class-diagram.png the real
+# connectors came back at extent 0.000-0.068 and solidity 0.001-0.122, while a filled
+# blob (the thing that genuinely wants to be a raster picture) sits near 1.0 on both.
+POLYLINE_MAX_EXTENT = 0.10
+POLYLINE_MAX_SOLIDITY = 0.30
+POLYLINE_EPSILON_FRAC = 0.005  # approxPolyDP tolerance, as a fraction of arc length
+POLYLINE_MAX_POINTS = 64  # cap so one noisy squiggle can't emit a thousand-point path
+POLYLINE_MIN_POINTS = 2  # fewer than this is not a path; fall back to a raster crop
+
+CLAIMED_STROKE_PX = 3  # pen width used to mark a traced contour's own ink as claimed
+
 RESIDUAL_DILATE_PX = 9  # merge nearby ink fragments into one blob before componentizing
 RESIDUAL_MIN_AREA_PX = 150  # noise floor for residual (unclassified) ink blobs
 RESIDUAL_MAX_SHAPES = 40  # hard cap so a noisy scan can't spam hundreds of crops
@@ -19,10 +31,15 @@ TEXT_HOLE_TOL_PX = 4  # how closely a hole contour must hug a masked text bbox t
 
 @dataclass
 class ShapeResult:
-    shape_type: str   # "circle", "ellipse", "triangle", "rect", "square", "line", "complex"
+    # "circle", "ellipse", "triangle", "rect", "square", "line", "polyline", "complex"
+    shape_type: str
     bbox_px: dict     # {x, y, w, h} in pixel coordinates
     confidence: float
     crop: Optional[np.ndarray] = None  # Only set for complex shapes
+    # Only set for "polyline": the simplified path, as (x, y) fractions of bbox_px.
+    # Relative on purpose — the rest of the pipeline maps px -> relative -> EMU, and
+    # a path stored in absolute pixels would not survive that.
+    points: Optional[list[tuple[float, float]]] = None
 
 
 def detect_shapes(image: np.ndarray, text_bboxes_px: list[dict]) -> list[ShapeResult]:
@@ -85,15 +102,32 @@ def detect_shapes(image: np.ndarray, text_bboxes_px: list[dict]) -> list[ShapeRe
             # ~300 but is clearly real ink); accept on diagonal/arc-length as a fallback.
             continue
 
+        bbox_px = {"x": x, "y": y, "w": w, "h": h}
         shape_type, confidence = _classify(cnt)
+
+        points = None
+        if shape_type == "polyline":
+            points = _polyline_points(cnt, bbox_px)
+            if len(points) < POLYLINE_MIN_POINTS:
+                # Nothing left to draw as a path — better a picture than an empty shape.
+                shape_type, points = "complex", None
+
         crop = crop_source[y:y + h, x:x + w].copy() if shape_type == "complex" else None
         results.append(ShapeResult(
             shape_type=shape_type,
-            bbox_px={"x": x, "y": y, "w": w, "h": h},
+            bbox_px=bbox_px,
             confidence=confidence,
             crop=crop,
+            points=points,
         ))
         cv2.drawContours(claimed_mask, [cnt], -1, 255, thickness=cv2.FILLED)
+        # ponytail: FILLED alone claims a solid shape's ink, but an open stroke encloses
+        # no area, so its own pixels stayed unclaimed and came back a second time as a
+        # residual "complex" blob — the same connector emitted twice, once as a path and
+        # once as a raster. Stroking the contour claims the ink we actually traced.
+        # Ceiling: a fixed 3px pen, so a stroke drawn thicker leaves a thin unclaimed
+        # halo; upgrade path is sizing the pen off the contour's minAreaRect short side.
+        cv2.drawContours(claimed_mask, [cnt], -1, 255, thickness=CLAIMED_STROKE_PX)
 
     results.extend(_residual_shapes(crop_source, binary, claimed_mask))
     return results
@@ -177,8 +211,30 @@ def _classify(contour) -> tuple[str, float]:
     rect = cv2.minAreaRect(contour)
     (rw, rh) = rect[1]
     long_side, short_side = max(rw, rh), min(rw, rh)
-    if short_side > 0 and long_side / short_side >= LINE_ASPECT_RATIO and short_side <= LINE_MAX_THICKNESS_PX:
+    # A perfectly thin axis-aligned stroke gives minAreaRect a short side of exactly
+    # 0.0 (proven: a 300x1 ink run reports (299.0, 0.0)). Guarding on `short_side > 0`
+    # made every hairline fall through to "complex" and get embedded as a raster image
+    # one pixel tall. Zero means "1 pixel thick", not "unclassifiable", so floor it —
+    # which also keeps the division safe.
+    short_side = max(short_side, 1.0)
+    if long_side / short_side >= LINE_ASPECT_RATIO and short_side <= LINE_MAX_THICKNESS_PX:
         return "line", 0.9
+
+    x, y, w, h = cv2.boundingRect(contour)
+    bbox_area = w * h
+    # Extent: ratio of contour area to its bounding box area.
+    # Rectangles fill ~100% of their bbox; ellipses fill ~π/4 ≈ 78%.
+    extent = cv2.contourArea(contour) / bbox_area if bbox_area > 0 else 1.0
+
+    # ponytail: an open path (a curved connector, a leader, an elbow) is traced out and
+    # back, so it encloses ~no area and both extent and solidity collapse toward zero.
+    # That's the whole test, and it has to run before the vertex counting below or an
+    # L-shaped stroke gets counted as a 3-vertex "triangle". Ceiling: two thresholds
+    # tuned on one class of drawing, so a genuinely *filled* sliver (a very thin wedge)
+    # would also read as a path. Upgrade path is comparing the contour's arc length
+    # against twice its skeleton length to prove the retrace directly.
+    if extent < POLYLINE_MAX_EXTENT and _solidity(contour) < POLYLINE_MAX_SOLIDITY:
+        return "polyline", 0.8
 
     peri = cv2.arcLength(contour, True)
     approx = cv2.approxPolyDP(contour, 0.04 * peri, True)
@@ -188,11 +244,6 @@ def _classify(contour) -> tuple[str, float]:
         return "triangle", 0.95
 
     if vertices == 4:
-        x, y, w, h = cv2.boundingRect(contour)
-        bbox_area = w * h
-        # Extent: ratio of contour area to its bounding box area.
-        # Rectangles fill ~100% of their bbox; ellipses fill ~π/4 ≈ 78%.
-        extent = cv2.contourArea(contour) / bbox_area if bbox_area > 0 else 1.0
         if extent < 0.85:
             # Low extent means the shape is curved (ellipse/circle), not a flat rect
             circ = _circularity(contour)
@@ -214,6 +265,41 @@ def _classify(contour) -> tuple[str, float]:
         # High circularity + high solidity → smooth convex curve = ellipse
         return "ellipse", float(circ)
     return "complex", 0.70
+
+
+def _polyline_points(contour, bbox_px: dict) -> list[tuple[float, float]]:
+    """Simplify an open-stroke contour to a short path, as (x, y) fractions of its bbox.
+
+    Fractions, not pixels, because the pipeline maps px -> relative -> EMU
+    (layout_reconstructor.to_relative_bbox, word_assembler._emu_coords) and an absolute
+    path would not survive that; 0..1 of the shape's own box does.
+
+    ponytail: the contour is the stroke's *outline*, so it walks the path out and back
+    and the emitted path retraces itself. That draws correctly (a hairline stroke's two
+    sides are the same line) at roughly double the point count. Ceiling: a thick stroke
+    renders as its outline rather than its centreline. Upgrade path is skeletonising the
+    stroke and emitting the centreline once, with a real width.
+    """
+    peri = cv2.arcLength(contour, False)
+    eps = max(peri * POLYLINE_EPSILON_FRAC, 1.0)
+    approx = cv2.approxPolyDP(contour, eps, False)
+    for _ in range(8):  # bounded: eps only grows, so the point count only shrinks
+        if len(approx) <= POLYLINE_MAX_POINTS:
+            break
+        eps *= 1.6
+        approx = cv2.approxPolyDP(contour, eps, False)
+
+    x, y = bbox_px["x"], bbox_px["y"]
+    w, h = max(bbox_px["w"], 1), max(bbox_px["h"], 1)
+    points: list[tuple[float, float]] = []
+    for px, py in approx.reshape(-1, 2):
+        pt = (
+            min(max((float(px) - x) / w, 0.0), 1.0),
+            min(max((float(py) - y) / h, 0.0), 1.0),
+        )
+        if not points or pt != points[-1]:
+            points.append(pt)
+    return points
 
 
 def _circularity(contour) -> float:

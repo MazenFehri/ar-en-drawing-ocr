@@ -7,7 +7,9 @@ from lxml import etree
 import numpy as np
 from docx import Document
 from docx.enum.section import WD_ORIENT
-from models.elements import Element, TextElement, SimpleShapeElement, ComplexShapeElement
+from models.elements import (
+    Element, TextElement, SimpleShapeElement, PolylineShapeElement, ComplexShapeElement,
+)
 from utils.image_utils import ndarray_to_png_bytes
 
 # A4 page geometry in EMU (914400 EMU = 1 inch), portrait orientation
@@ -61,6 +63,10 @@ _WORD_SHAPE = {
 
 _HIGHLIGHT_MAP = {"yellow": "yellow", "red": "red"}
 
+# Coordinate space a custGeom path is expressed in before DrawingML scales it to the
+# shape extent. 100000 gives ~5 significant digits of path precision at any size.
+_PATH_SPACE = 100_000
+
 # Every anchor used to carry the same relativeHeight, which left stacking order
 # up to document order — and reconstruct_layout emits text first, shapes second,
 # so a shape whose bbox enclosed a label was painted *over* that label and hid
@@ -112,6 +118,9 @@ def assemble_document(
         elif isinstance(el, SimpleShapeElement):
             prst = _WORD_SHAPE.get(el.shape, "rect")
             xml_str = _shape_xml(prst, left, top, w, h, _counter=_counter)
+        elif isinstance(el, PolylineShapeElement):
+            if len(el.points) >= 2:
+                xml_str = _polyline_xml(el.points, left, top, w, h, _counter=_counter)
         elif isinstance(el, ComplexShapeElement):
             crop = crop_images.get(el.id)
             if crop is not None:
@@ -272,6 +281,55 @@ def _shape_xml(prst: str, left: int, top: int, cx: int, cy: int, _counter: Itera
         f'<a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>'
         # Architectural line art: outline only, no default Word blue fill.
         # noFill/ln must come right after prstGeom or Word refuses the file.
+        '<a:noFill/>'
+        '<a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>'
+        '</wps:spPr>'
+        '<wps:bodyPr/>'
+        '</wps:wsp>'
+        '</a:graphicData>'
+        '</a:graphic>',
+        _counter,
+        z=_Z_GRAPHIC,
+    )
+
+
+def _polyline_xml(points: list[tuple[float, float]], left: int, top: int, cx: int, cy: int,
+                  _counter: Iterator[int]) -> str:
+    """An open path as a real DrawingML freeform (a:custGeom), not a picture.
+
+    A connector/leader line has no preset geometry, and rasterising it was the bug:
+    shapes belong in Word as shapes. Same outline-only styling and same z-band as
+    _shape_xml, so it still sits below the text.
+    """
+    ns_a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    ns_wps = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"'
+
+    # The path declares its own coordinate space (a:path w/h) which DrawingML scales to
+    # the shape's extent. A fixed space, rather than cx/cy, keeps the geometry sane when
+    # an extent has been floored to a near-zero EMU by _emu_coords.
+    def _pt(p: tuple[float, float]) -> str:
+        x = int(round(min(max(p[0], 0.0), 1.0) * _PATH_SPACE))
+        y = int(round(min(max(p[1], 0.0), 1.0) * _PATH_SPACE))
+        return f'<a:pt x="{x}" y="{y}"/>'
+
+    segments = f"<a:moveTo>{_pt(points[0])}</a:moveTo>" + "".join(
+        f"<a:lnTo>{_pt(p)}</a:lnTo>" for p in points[1:]
+    )
+    return _anchor_wrap(left, top, cx, cy,
+        f'<a:graphic {ns_a}>'
+        '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        f'<wps:wsp {ns_wps}>'
+        '<wps:cNvSpPr/>'
+        '<wps:spPr>'
+        f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
+        # avLst/gdLst are empty but present: Word writes them and the schema orders
+        # custGeom's children avLst, gdLst, ahLst, cxnLst, rect, pathLst.
+        '<a:custGeom><a:avLst/><a:gdLst/>'
+        f'<a:pathLst><a:path w="{_PATH_SPACE}" h="{_PATH_SPACE}" fill="none">'
+        f'{segments}'
+        '</a:path></a:pathLst></a:custGeom>'
+        # No a:close: this is an open stroke, closing it would draw a phantom chord
+        # back to the start point.
         '<a:noFill/>'
         '<a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>'
         '</wps:spPr>'

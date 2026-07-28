@@ -1,4 +1,9 @@
-from models.elements import BBox, TextElement, SimpleShapeElement, ComplexShapeElement, LLMCorrection
+import json
+
+from models.elements import (
+    BBox, TextElement, SimpleShapeElement, PolylineShapeElement, ComplexShapeElement,
+    LLMCorrection,
+)
 from pipeline.sidecar import build_sidecar
 
 
@@ -61,6 +66,26 @@ def test_sidecar_total_elements():
     ]
     result = build_sidecar(elements, 800, 600, 100)
     assert result["stats"]["total_elements"] == 2
+
+
+def test_sidecar_polyline_shape_fields():
+    elements = [
+        PolylineShapeElement(
+            id="pl0", bbox=BBox(x=0.1, y=0.2, w=0.3, h=0.4),
+            points=[(0.0, 0.0), (0.5, 0.75), (1.0, 1.0)], confidence=0.8,
+        )
+    ]
+    result = build_sidecar(elements, 800, 600, 100)
+    el = result["elements"][0]
+    assert el["type"] == "polyline_shape"
+    assert el["shape"] == "polyline"
+    # Counted apart from complex_shapes: a polyline is vector art, not an embedded image.
+    assert result["stats"]["polyline_shapes"] == 1
+    assert result["stats"]["complex_shapes"] == 0
+    assert result["stats"]["simple_shapes"] == 0
+    # Points must be JSON-serialisable lists (this dict goes out over the wire).
+    assert el["points"] == [[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]]
+    json.dumps(result)
 
 
 def test_sidecar_complex_shape_fields():

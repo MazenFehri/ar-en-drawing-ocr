@@ -1,4 +1,6 @@
-from models.elements import Element, TextElement, SimpleShapeElement, ComplexShapeElement
+from models.elements import (
+    Element, TextElement, SimpleShapeElement, PolylineShapeElement, ComplexShapeElement,
+)
 
 
 def build_sidecar(
@@ -13,6 +15,7 @@ def build_sidecar(
     serialized = [_serialize(e) for e in elements]
     text_count = sum(1 for e in elements if isinstance(e, TextElement))
     simple_count = sum(1 for e in elements if isinstance(e, SimpleShapeElement))
+    polyline_count = sum(1 for e in elements if isinstance(e, PolylineShapeElement))
     complex_count = sum(1 for e in elements if isinstance(e, ComplexShapeElement))
     correction_count = sum(
         1 for e in elements
@@ -25,6 +28,10 @@ def build_sidecar(
             "total_elements": len(elements),
             "text_elements": text_count,
             "simple_shapes": simple_count,
+            # Counted separately from simple_shapes: these are vector freeforms with a
+            # point list, not preset geometry, and separately from complex_shapes
+            # because they are NOT embedded as images.
+            "polyline_shapes": polyline_count,
             "complex_shapes": complex_count,
             "llm_corrections": correction_count,
             "processing_time_ms": processing_time_ms,
@@ -55,6 +62,11 @@ def _serialize(el: Element) -> dict:
     elif isinstance(el, SimpleShapeElement):
         d["shape"] = el.shape
         d["confidence"] = el.confidence
+    elif isinstance(el, PolylineShapeElement):
+        d["shape"] = el.shape
+        d["confidence"] = el.confidence
+        # Plain lists, not tuples: this dict goes straight out as JSON.
+        d["points"] = [[float(px), float(py)] for px, py in el.points]
     elif isinstance(el, ComplexShapeElement):
         d["shape"] = el.shape
         d["embedded_as"] = el.embedded_as
