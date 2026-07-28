@@ -171,6 +171,11 @@ def _introduces_unseen_script(chunk_lang: str, corrected: str) -> bool:
 # (worst case ~20 base64 JPEGs). If that ever proves too large for the free tier,
 # lower MAX_WORDS_PER_CALL rather than shrinking crops — legibility matters more.
 MAX_WORDS_PER_CALL = 20
+
+# Highlight for a below-threshold word that no model answer ever covered. Red
+# rather than yellow: yellow means "corrected, and the model was fairly sure",
+# which is a stronger claim than anything we can make about an unchecked word.
+_UNVERIFIED_HIGHLIGHT = "red"
 MAX_CROPS_PER_CALL = 8
 
 # A flagged word cropped tight has no context and a 15-20px tall Arabic word is
@@ -305,7 +310,8 @@ def apply_corrections(
     from app.config import settings
     if not settings.openrouter_api_key:
         logger.warning("LLM correction skipped: OPENROUTER_API_KEY is not configured")
-        return elements, _status("not_attempted", "not_configured")
+        return _mark_unverified(elements, confidence_threshold), _status(
+            "not_attempted", "not_configured")
 
     # Decode once up front — every chunk crops out of the same page array, no
     # need to re-decode per chunk. A page that fails to decode can't be cropped
@@ -314,7 +320,7 @@ def apply_corrections(
     page = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
     if page is None:
         logger.warning("LLM correction skipped: page image could not be decoded")
-        return elements, _status("failed", "parse_error")
+        return _mark_unverified(elements, confidence_threshold), _status("failed", "parse_error")
 
     client = _get_client()
     # Confident sibling text sharing a flagged word's innermost detected shape
@@ -373,7 +379,7 @@ def apply_corrections(
             last_status = _status("failed", exc.reason)
 
     if not any_success:
-        return elements, last_status
+        return _mark_unverified(elements, confidence_threshold), last_status
 
     updated = []
     for el in elements:
@@ -407,9 +413,41 @@ def apply_corrections(
                 ),
                 "highlight": "yellow" if certainty >= 0.60 else "red",
             }))
-        else:
+        elif corr_data:
+            # The model answered about this word and left it alone — confirmed,
+            # not merely unchecked. No highlight; see the comment above.
             updated.append(el)
+        else:
+            # No answer came back for this id at all (partial response, chunk
+            # failure). OCR wasn't confident and nothing verified it, so it
+            # ships marked rather than passing as certain.
+            updated.append(el.model_copy(update={"highlight": _UNVERIFIED_HIGHLIGHT}))
     return updated, last_status
+
+
+def _mark_unverified(elements: list[Element], confidence_threshold: float) -> list[Element]:
+    """Highlight every below-threshold word, for the paths where no LLM answer arrived.
+
+    Highlighting used to happen only when the model returned a correction, so any
+    LLM failure — rate limit, missing key, undecodable page — shipped low-confidence
+    OCR looking exactly like text read at 0.99. That is the wrong way round: the
+    whole point of the confidence threshold is to surface uncertainty for review,
+    and whether a third-party API answered has no bearing on whether the OCR was
+    sure. Measured on class-diagram.png with the free tier rate-limited: 2 words
+    below threshold ('"^' at 0.62, '١er' at 0.71), 0 highlighted.
+
+    ponytail: one colour for "nobody checked this", distinct from the yellow/red
+    the model's own certainty picks when it does answer. Ceiling: a reviewer can't
+    tell "LLM was down" from "LLM answered with low certainty" — both are red.
+    Upgrade path if that matters: the sidecar's llm_status already says which, and
+    a third highlight colour is a one-line change here.
+    """
+    return [
+        el.model_copy(update={"highlight": _UNVERIFIED_HIGHLIGHT})
+        if isinstance(el, TextElement) and el.confidence < confidence_threshold
+        else el
+        for el in elements
+    ]
 
 
 def label_complex_shapes(

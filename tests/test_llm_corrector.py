@@ -1195,3 +1195,64 @@ def test_legitimate_arabic_correction_on_mixed_chunk_is_applied(mock_client_fn):
     by_id = {e.id: e for e in result}
     assert by_id["t1"].llm_correction.corrected == "غرفة"
     assert status["state"] == "success"
+
+
+# --- unverified low-confidence words must still be highlighted ---------------
+# Highlighting used to happen only inside the "model returned a correction"
+# branch, so any LLM failure shipped below-threshold OCR looking identical to
+# text read at 0.99. Measured on class-diagram.png with the free tier
+# rate-limited: 2 words under threshold, 0 highlighted.
+
+def _llm_down(*_a, **_kw):
+    from pipeline.llm_corrector import _LLMFailure
+    raise _LLMFailure("rate_limited")
+
+
+@patch("pipeline.llm_corrector._get_client", MagicMock())
+@patch("pipeline.llm_corrector._request_with_fallback", side_effect=_llm_down)
+def test_low_confidence_is_highlighted_when_the_llm_fails(_mock):
+    els = [make_text_el("t0", "sure", 0.99), make_text_el("t1", '"^', 0.62)]
+    out, status = apply_corrections(els, FAKE_PAGE, confidence_threshold=0.75)
+    assert status["state"] == "failed"
+    assert out[0].highlight is None, "confident text must not be marked"
+    assert out[1].highlight is not None, "unverified low-confidence text shipped unmarked"
+
+
+def test_low_confidence_is_highlighted_when_no_api_key():
+    # apply_corrections imports settings inside the function, so patch the real
+    # settings object's attribute rather than a module-level name that isn't there.
+    from app.config import settings
+    with patch.object(settings, "openrouter_api_key", ""):
+        els = [make_text_el("t0", "sure", 0.99), make_text_el("t1", "er1", 0.71)]
+        out, status = apply_corrections(els, FAKE_PAGE, confidence_threshold=0.75)
+    assert status["reason"] == "not_configured"
+    assert out[0].highlight is None
+    assert out[1].highlight is not None
+
+
+@patch("pipeline.llm_corrector._get_client", MagicMock())
+@patch("pipeline.llm_corrector._request_with_fallback")
+def test_word_the_model_confirmed_is_not_highlighted(mock_req):
+    # Model answered and left it alone -> verified, no highlight. Distinct from
+    # "no answer came back for this id", which must be highlighted.
+    mock_req.return_value = (
+        [{"index": 0, "corrected": "user", "certainty": 0.9}],
+        {"state": "success", "reason": None, "model": "m"},
+    )
+    els = [make_text_el("t0", "user", 0.62)]
+    out, _ = apply_corrections(els, FAKE_PAGE, confidence_threshold=0.75)
+    assert out[0].content == "user"
+    assert out[0].highlight is None
+
+
+@patch("pipeline.llm_corrector._get_client", MagicMock())
+@patch("pipeline.llm_corrector._request_with_fallback")
+def test_word_the_model_never_answered_about_is_highlighted(mock_req):
+    # Partial response: two flagged words, the model only answers about one.
+    mock_req.return_value = (
+        [{"index": 0, "corrected": "user", "certainty": 0.9}],
+        {"state": "success", "reason": None, "model": "m"},
+    )
+    els = [make_text_el("t0", "usr", 0.62), make_text_el("t1", '"^', 0.60)]
+    out, _ = apply_corrections(els, FAKE_PAGE, confidence_threshold=0.75)
+    assert out[1].highlight is not None, "no answer covered t1; it must not pass as certain"
