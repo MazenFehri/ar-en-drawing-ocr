@@ -13,6 +13,9 @@ RESIDUAL_DILATE_PX = 9  # merge nearby ink fragments into one blob before compon
 RESIDUAL_MIN_AREA_PX = 150  # noise floor for residual (unclassified) ink blobs
 RESIDUAL_MAX_SHAPES = 40  # hard cap so a noisy scan can't spam hundreds of crops
 
+TEXT_ERASE_RING_PX = 6  # ring width sampled just outside a text bbox for its fill colour
+TEXT_HOLE_TOL_PX = 4  # how closely a hole contour must hug a masked text bbox to be ours
+
 
 @dataclass
 class ShapeResult:
@@ -42,6 +45,13 @@ def detect_shapes(image: np.ndarray, text_bboxes_px: list[dict]) -> list[ShapeRe
         x, y, w, h = int(tb["x"]), int(tb["y"]), int(tb["w"]), int(tb["h"])
         cv2.rectangle(binary, (x, y), (x + w, y + h), 0, -1)
 
+    # Crops (below) are cut from this, not from `image`: masking `binary` only keeps
+    # text out of the CONTOUR search, it doesn't stop a "complex" shape's bbox from
+    # enclosing text and dragging the words along into the embedded picture, so the
+    # doc ends up with the text twice (real OCR run + baked into the shape image).
+    # Built once up front and reused for every crop below, not patched per-crop.
+    crop_source = _erase_text_for_crop(image, text_bboxes_px)
+
     # ponytail: RETR_CCOMP (not RETR_EXTERNAL) so interior content (inner walls, doors,
     # furniture symbols) inside an outer outline is no longer discarded — that was the
     # critical bug. RETR_CCOMP gives a 2-level hierarchy (outer boundaries / holes) which
@@ -59,6 +69,13 @@ def detect_shapes(image: np.ndarray, text_bboxes_px: list[dict]) -> list[ShapeRe
         if parent != -1 and _is_hole_of_parent(cnt, contours[parent]):
             # This is the inner edge of a stroke whose outer edge we already keep — skip it.
             continue
+        if parent != -1 and _is_text_mask_hole(cnt, text_bboxes_px):
+            # Our own doing: blanking a text bbox out of `binary` punches a hole in any
+            # surrounding solid ink (a colour-filled label box reads as ink under Otsu),
+            # and RETR_CCOMP reports that hole as a nested contour. Left in, every word
+            # inside a filled box comes back as a phantom "rect" and the document gets an
+            # empty rectangle outlined around each label.
+            continue
 
         area = cv2.contourArea(cnt)
         x, y, w, h = cv2.boundingRect(cnt)
@@ -69,7 +86,7 @@ def detect_shapes(image: np.ndarray, text_bboxes_px: list[dict]) -> list[ShapeRe
             continue
 
         shape_type, confidence = _classify(cnt)
-        crop = image[y:y + h, x:x + w].copy() if shape_type == "complex" else None
+        crop = crop_source[y:y + h, x:x + w].copy() if shape_type == "complex" else None
         results.append(ShapeResult(
             shape_type=shape_type,
             bbox_px={"x": x, "y": y, "w": w, "h": h},
@@ -78,8 +95,67 @@ def detect_shapes(image: np.ndarray, text_bboxes_px: list[dict]) -> list[ShapeRe
         ))
         cv2.drawContours(claimed_mask, [cnt], -1, 255, thickness=cv2.FILLED)
 
-    results.extend(_residual_shapes(image, binary, claimed_mask))
+    results.extend(_residual_shapes(crop_source, binary, claimed_mask))
     return results
+
+
+def _erase_text_for_crop(image: np.ndarray, text_bboxes_px: list[dict]) -> np.ndarray:
+    """Return a copy of `image` with every text bbox filled in, for cutting crops from.
+
+    Not plain white: these boxes are often colour-filled (e.g. a UML class-diagram
+    header bar), and a white punch-out on a coloured box looks broken. Instead sample
+    the median colour of a thin ring just outside the bbox and fill with that, so the
+    patch blends into whatever's actually there — white paper stays white, a blue box
+    stays blue.
+    """
+    if not text_bboxes_px:
+        return image
+    crop_source = image.copy()
+    img_h, img_w = image.shape[:2]
+    for tb in text_bboxes_px:
+        x, y, w, h = int(tb["x"]), int(tb["y"]), int(tb["w"]), int(tb["h"])
+        x0, y0 = max(x, 0), max(y, 0)
+        x1, y1 = min(x + w, img_w), min(y + h, img_h)
+        if x1 <= x0 or y1 <= y0:
+            continue
+
+        ring_x0, ring_y0 = max(x0 - TEXT_ERASE_RING_PX, 0), max(y0 - TEXT_ERASE_RING_PX, 0)
+        ring_x1, ring_y1 = min(x1 + TEXT_ERASE_RING_PX, img_w), min(y1 + TEXT_ERASE_RING_PX, img_h)
+        ring_region = crop_source[ring_y0:ring_y1, ring_x0:ring_x1]
+        ring_mask = np.ones(ring_region.shape[:2], dtype=bool)
+        ring_mask[y0 - ring_y0:y1 - ring_y0, x0 - ring_x0:x1 - ring_x0] = False
+        ring_pixels = ring_region[ring_mask]
+        if ring_pixels.size == 0:
+            # ponytail: bbox has no surroundings to sample (e.g. text fills the whole
+            # image). Ceiling: leaves the text pixels untouched in that corner case;
+            # upgrade path is falling back to the image's own overall median colour.
+            continue
+
+        fill_color = np.median(ring_pixels, axis=0)
+        crop_source[y0:y1, x0:x1] = fill_color
+    return crop_source
+
+
+def _is_text_mask_hole(cnt, text_bboxes_px: list[dict]) -> bool:
+    """True if this hole contour is just the outline of a text bbox we blanked ourselves.
+
+    The traced hole sits a pixel or so outside the rectangle we filled, so this matches on
+    all four edges within a small tolerance rather than on containment.
+    ponytail: a real rectangle drawn tightly around a label, within TEXT_HOLE_TOL_PX of the
+    OCR word box on every side, would also be dropped. OCR boxes hug the glyphs and a drawn
+    box has visible padding, so the tolerance keeps them apart in practice. Upgrade path if
+    real boxes start vanishing: only skip when the hole has no ink of its own inside it.
+    """
+    x, y, w, h = cv2.boundingRect(cnt)
+    for tb in text_bboxes_px:
+        tx, ty, tw, th = int(tb["x"]), int(tb["y"]), int(tb["w"]), int(tb["h"])
+        if (
+            abs(x - tx) <= TEXT_HOLE_TOL_PX and abs(y - ty) <= TEXT_HOLE_TOL_PX and
+            abs((x + w) - (tx + tw)) <= TEXT_HOLE_TOL_PX and
+            abs((y + h) - (ty + th)) <= TEXT_HOLE_TOL_PX
+        ):
+            return True
+    return False
 
 
 def _is_hole_of_parent(cnt, parent_cnt) -> bool:
@@ -156,12 +232,15 @@ def _solidity(contour) -> float:
     return cv2.contourArea(contour) / hull_area
 
 
-def _residual_shapes(image: np.ndarray, binary: np.ndarray, claimed_mask: np.ndarray) -> list[ShapeResult]:
+def _residual_shapes(crop_source: np.ndarray, binary: np.ndarray, claimed_mask: np.ndarray) -> list[ShapeResult]:
     """Catch-all for ink that's neither OCR text nor a contour we classified above.
 
     This is the fix for "drawings silently vanish": dilate whatever's left, group it
     into connected components, and emit each as a "complex" shape with its crop so the
     word assembler embeds it as an image at the right spot, even though we can't name it.
+
+    crop_source: the text-erased image (see _erase_text_for_crop), not the raw one —
+    a residual blob's bbox can enclose text too, same duplication bug as _classify's crop.
     """
     residual = cv2.bitwise_and(binary, cv2.bitwise_not(claimed_mask))
     if not np.any(residual):
@@ -193,7 +272,7 @@ def _residual_shapes(image: np.ndarray, binary: np.ndarray, claimed_mask: np.nda
 
     results = []
     for area, x, y, w, h in boxes:
-        crop = image[y:y + h, x:x + w].copy()
+        crop = crop_source[y:y + h, x:x + w].copy()
         results.append(ShapeResult(
             shape_type="complex",
             bbox_px={"x": x, "y": y, "w": w, "h": h},

@@ -137,6 +137,82 @@ def test_diagonal_line_classified():
     assert shapes[0].shape_type == "line"
 
 
+def test_text_in_filled_box_does_not_produce_phantom_rects():
+    # A colour-filled box reads as solid ink under Otsu, so blanking each text bbox out
+    # of `binary` punches holes in it that RETR_CCOMP reports as nested contours. Left
+    # in, every word inside the box came back as its own "rect" and the document drew an
+    # empty rectangle around each label. Only the box itself should be reported.
+    img = np.ones((400, 400, 3), dtype=np.uint8) * 255
+    pts = np.array([[200, 50], [320, 150], [300, 300], [150, 350], [80, 200]], np.int32)
+    cv2.fillPoly(img, [pts], (120, 60, 20))
+    text_bboxes = [
+        {"x": 170, "y": 190, "w": 40, "h": 15},
+        {"x": 170, "y": 220, "w": 60, "h": 15},
+    ]
+    for tb in text_bboxes:
+        cv2.rectangle(
+            img, (tb["x"], tb["y"]), (tb["x"] + tb["w"], tb["y"] + tb["h"]), (0, 0, 0), -1,
+        )
+
+    shapes = detect_shapes(img, text_bboxes_px=text_bboxes)
+
+    for tb in text_bboxes:
+        for s in shapes:
+            hugs_text = (
+                abs(s.bbox_px["x"] - tb["x"]) <= 4 and abs(s.bbox_px["y"] - tb["y"]) <= 4 and
+                abs(s.bbox_px["w"] - tb["w"]) <= 8 and abs(s.bbox_px["h"] - tb["h"]) <= 8
+            )
+            assert not hugs_text, f"phantom shape reported at text bbox {tb}: {s.bbox_px}"
+    # The box itself must still survive — dropping the holes must not drop real content.
+    assert any(s.crop is not None for s in shapes)
+
+
+def test_text_inside_complex_shape_not_baked_into_crop():
+    # Regression test for: crops were cut from the raw image, so a "complex" shape
+    # whose bbox enclosed OCR'd text (e.g. a colour-filled class-diagram box) carried
+    # the words into the embedded picture — duplicating them alongside the real OCR
+    # text run. The box's colour fill must survive; only the text pixels must not.
+    img = np.ones((400, 400, 3), dtype=np.uint8) * 255
+    fill_color = (120, 60, 20)  # BGR, dark enough to read as ink, distinct from black/white
+    pts = np.array([[200, 50], [320, 150], [300, 300], [150, 350], [80, 200]], np.int32)
+    cv2.fillPoly(img, [pts], fill_color)
+
+    # Dark "text" blobs sitting well inside the box, away from its edges.
+    text_bboxes = [
+        {"x": 170, "y": 190, "w": 40, "h": 15},
+        {"x": 170, "y": 220, "w": 60, "h": 15},
+    ]
+    for tb in text_bboxes:
+        cv2.rectangle(
+            img, (tb["x"], tb["y"]), (tb["x"] + tb["w"], tb["y"] + tb["h"]), (0, 0, 0), -1,
+        )
+    original = img.copy()
+
+    shapes = detect_shapes(img, text_bboxes_px=text_bboxes)
+    complex_shapes = [s for s in shapes if s.shape_type == "complex" and s.crop is not None]
+    assert len(complex_shapes) >= 1
+
+    for shape in complex_shapes:
+        sx, sy = shape.bbox_px["x"], shape.bbox_px["y"]
+        crop = shape.crop
+        for tb in text_bboxes:
+            lx0, ly0 = tb["x"] - sx, tb["y"] - sy
+            lx1, ly1 = lx0 + tb["w"], ly0 + tb["h"]
+            if lx0 < 0 or ly0 < 0 or lx1 > crop.shape[1] or ly1 > crop.shape[0]:
+                continue  # this text box isn't inside this particular shape's crop
+            patch = crop[ly0:ly1, lx0:lx1]
+            # No dark text pixels should have survived into the crop.
+            assert not np.any(np.all(patch < 50, axis=-1)), "text pixels leaked into crop"
+            # The erased patch should read as the box's fill colour, not a white punch-out.
+            median_patch = np.median(patch.reshape(-1, 3), axis=0)
+            assert np.allclose(median_patch, fill_color, atol=20), (
+                f"expected fill colour {fill_color}, got {median_patch}"
+            )
+
+    # detect_shapes must not mutate the caller's image while building the crop source.
+    assert np.array_equal(img, original)
+
+
 def test_residual_ink_produces_complex_shape():
     # A cluster of small strokes, each individually below the noise floor, but
     # together clearly meaningful ink (e.g. hatching or a broken/dashed leader).
