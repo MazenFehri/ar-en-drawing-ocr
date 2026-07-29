@@ -26,6 +26,17 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Three distributions (opencv-python, opencv-contrib-python, opencv-python-headless via
+# pdf2docx) all unpack into the same site-packages/cv2, and none of them can be dropped
+# — see the comment block in requirements.txt. Only the contrib build carries
+# cv2.ximgproc, which pipeline/shape_detector.py detects line segments with, so reinstall
+# it last and let it win the directory outright instead of leaving it to pip's resolution
+# order. --no-deps because everything it needs is already resolved above. The assert is
+# the point of the step: a silent regression here would quietly downgrade every drawing
+# to the LSD fallback path.
+RUN pip install --no-cache-dir --force-reinstall --no-deps opencv-contrib-python==4.6.0.66 \
+    && python -c "import cv2; assert hasattr(cv2, 'ximgproc'), cv2.__version__; print('cv2', cv2.__version__, 'with ximgproc')"
+
 USER appuser
 
 # Create the model cache dir as appuser BEFORE anything tries to populate it,

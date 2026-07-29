@@ -2,7 +2,23 @@ fastapi==0.115.0
 uvicorn[standard]==0.29.0
 paddlepaddle==2.6.2
 paddleocr==2.7.3
+# pipeline/shape_detector.py needs cv2.ximgproc.createEdgeDrawing, which only the
+# contrib build ships, so declare it rather than inheriting it by luck from paddleocr.
+#
+# Both entries are deliberate and must stay pinned to the SAME version. Normally you
+# would keep exactly one opencv distribution, because all of them unpack into the same
+# site-packages/cv2 and the last one installed wins — but paddleocr==2.7.3 hard-requires
+# `opencv-python<=4.6.0.66` AND `opencv-contrib-python<=4.6.0.66`, and its dependency
+# pdf2docx drags in opencv-python-headless on top. Dropping either line here does not
+# uninstall anything, it only makes the version we get implicit. Same version on both =
+# whichever build wins the directory race, the ABI matches; the Dockerfile then forces
+# contrib to be the one that wins, so ximgproc is actually there.
+#
+# That <=4.6.0.66 cap is also why the WebP upload guard in app/main.py stays: 4.6.0.66
+# bundles a libwebp with CVE-2023-4863 and pip refuses to resolve anything newer while
+# paddleocr is pinned (verified: ResolutionImpossible against opencv 4.10.0.84).
 opencv-python==4.6.0.66
+opencv-contrib-python==4.6.0.66
 Pillow==12.3.0
 python-docx==1.1.2
 openai==1.35.0

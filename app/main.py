@@ -109,9 +109,12 @@ _MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 def _is_webp(raw: bytes) -> bool:
-    """WebP is refused because opencv-python is pinned to 4.6.0.66, which bundles a
-    libwebp carrying CVE-2023-4863 (heap overflow, exploited in the wild). The pin
-    can't move: paddleocr 2.7.3 requires opencv-python<=4.6.0.66.
+    """WebP is refused because opencv is pinned to 4.6.0.66, which bundles a libwebp
+    carrying CVE-2023-4863 (heap overflow, exploited in the wild). The pin still can't
+    move after the switch to the contrib build: paddleocr 2.7.3 requires BOTH
+    opencv-python<=4.6.0.66 and opencv-contrib-python<=4.6.0.66, and pip resolution
+    against opencv 4.10.0.84 was re-verified as ResolutionImpossible. Nothing about
+    adding cv2.ximgproc for shape detection changed the vulnerable decoder underneath.
 
     Sniffing the bytes rather than trusting content_type is the whole point —
     cv2.imdecode detects format from content, so a crafted WebP sent as image/png

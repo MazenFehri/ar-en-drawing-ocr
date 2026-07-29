@@ -1,7 +1,9 @@
 import numpy as np
 import cv2
 import pytest
-from pipeline.shape_detector import detect_shapes, ShapeResult, _classify
+from pipeline.shape_detector import (
+    detect_shapes, ShapeResult, _Seg, _merge_collinear, _assemble_rectangles,
+)
 
 MIN_TEST_AREA = 400  # Must match the module's MIN_AREA_PX
 
@@ -213,23 +215,18 @@ def test_text_inside_complex_shape_not_baked_into_crop():
     assert np.array_equal(img, original)
 
 
-def _ink_contour(h, w):
-    """Contour of a solid h x w ink block, as detect_shapes would find it."""
-    binary = np.zeros((h + 20, w + 20), dtype=np.uint8)
-    binary[10:10 + h, 10:10 + w] = 255
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return contours[0]
-
-
 @pytest.mark.parametrize("h,w", [(1, 300), (300, 1), (2, 300), (5, 300)])
 def test_thin_stroke_is_a_line_not_a_raster(h, w):
-    # A perfectly thin axis-aligned stroke makes cv2.minAreaRect report a short side of
-    # exactly 0.0. The old `short_side > 0` guard then skipped the line test entirely and
-    # the hairline fell through to "complex" — i.e. got embedded as a picture one pixel
-    # tall. The 2px/5px cases are here so the fix doesn't regress what already worked.
-    shape_type, confidence = _classify(_ink_contour(h, w))
-    assert shape_type == "line", f"{w}x{h} stroke classified as {shape_type}"
-    assert confidence == 0.9
+    # A thin axis-aligned stroke used to be classified from its contour, where
+    # minAreaRect reports a short side of exactly 0.0 and the hairline fell through to
+    # "complex" — i.e. got embedded as a picture one pixel tall. Strokes now come from
+    # the segment detector instead, so this asserts the end-to-end outcome rather than
+    # a contour heuristic that no longer exists.
+    img = make_canvas(h + 60, w + 60)
+    img[30:30 + h, 30:30 + w] = 0
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    assert [s.shape_type for s in shapes] == ["line"], f"{w}x{h} stroke -> {shapes}"
+    assert shapes[0].crop is None
 
 
 def test_hairline_end_to_end_is_a_line():
@@ -282,6 +279,126 @@ def test_filled_blob_still_rasterised():
     assert shapes[0].shape_type == "complex"
     assert shapes[0].crop is not None
     assert shapes[0].points is None
+
+
+def test_merge_collinear_collapses_both_sides_of_one_stroke():
+    # An edge detector reports a drawn stroke twice, once per side. Left unmerged, a box
+    # edge is two segments and nothing lines up into a rectangle.
+    merged = _merge_collinear([_Seg(20, 100, 280, 100), _Seg(20, 103, 280, 103)])
+    assert len(merged) == 1
+    assert merged[0].length == pytest.approx(260, abs=3)
+
+
+def test_merge_collinear_bridges_a_small_gap():
+    # A dashed or partly-occluded edge arrives in fragments; they are one edge.
+    merged = _merge_collinear([_Seg(20, 100, 140, 100), _Seg(150, 100, 280, 100)])
+    assert len(merged) == 1
+    assert merged[0].length == pytest.approx(260, abs=3)
+
+
+def test_merge_collinear_keeps_a_real_gap_apart():
+    merged = _merge_collinear([_Seg(20, 100, 140, 100), _Seg(220, 100, 280, 100)])
+    assert len(merged) == 2
+
+
+def test_rectangle_assembled_from_four_separate_segments():
+    # The whole point of the rewrite: a rectangle drawn as four strokes has no single
+    # closed contour to classify, so contour tracing could never recover it.
+    segs = [
+        _Seg(40, 40, 240, 40), _Seg(240, 40, 240, 200),
+        _Seg(240, 200, 40, 200), _Seg(40, 200, 40, 40),
+    ]
+    rects, used = _assemble_rectangles(segs)
+    assert len(rects) == 1
+    assert rects[0].shape_type == "rect"
+    assert used == {0, 1, 2, 3}
+    assert rects[0].bbox_px["w"] == pytest.approx(200, abs=2)
+    assert rects[0].bbox_px["h"] == pytest.approx(160, abs=2)
+
+
+def test_rotated_rectangle_becomes_a_closed_freeform():
+    # ShapeResult has no rotation field, so an axis-aligned "rect" would misdraw a
+    # tilted box. It goes out as a closed path instead, which is exact.
+    corners = [(150, 40), (280, 130), (190, 260), (60, 170)]
+    segs = [_Seg(*corners[i], *corners[(i + 1) % 4]) for i in range(4)]
+    rects, used = _assemble_rectangles(segs)
+    assert len(rects) == 1
+    assert rects[0].shape_type == "polyline"
+    assert rects[0].points is not None and len(rects[0].points) == 5
+    assert rects[0].points[0] == rects[0].points[-1]  # closed
+
+
+def test_box_touching_a_connector_still_yields_a_rectangle():
+    # class-diagram.png's actual failure mode, minimised: the moment a connector line
+    # touches a box border the two are one connected region, so findContours returned a
+    # snake around both and 0 of 11 class boxes came back as rectangles.
+    img = make_canvas(400, 400)
+    cv2.rectangle(img, (60, 60), (300, 220), (0, 0, 0), 2)
+    cv2.line(img, (300, 140), (380, 140), (0, 0, 0), 2)
+    cv2.line(img, (180, 220), (180, 380), (0, 0, 0), 2)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    rects = [s for s in shapes if s.shape_type in ("rect", "square")]
+    assert len(rects) == 1, [s.shape_type for s in shapes]
+    assert rects[0].bbox_px["w"] == pytest.approx(240, abs=8)
+    assert rects[0].bbox_px["h"] == pytest.approx(160, abs=8)
+    assert not any(s.shape_type == "complex" for s in shapes), "line art was rasterised"
+
+
+def test_forward_diagonal_is_a_freeform_not_a_mirrored_line():
+    # prstGeom="line" always runs top-left -> bottom-right of its box, so a "/" segment
+    # would render mirrored. Same bbox, wrong picture — that one goes out as a path.
+    img = make_canvas(320, 320)
+    cv2.line(img, (30, 280), (290, 40), (0, 0, 0), 2)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    assert [s.shape_type for s in shapes] == ["polyline"], [s.shape_type for s in shapes]
+    pts = shapes[0].points
+    assert len(pts) == 2
+    # Bottom-left to top-right, in bbox fractions.
+    assert {(round(x), round(y)) for x, y in pts} == {(0, 1), (1, 0)}
+
+
+def test_textured_photographic_region_still_rasterises():
+    # The segment pass must not shred a photo into edges. An irregular textured region
+    # is not line art and has to keep arriving as one picture with its pixels intact.
+    rng = np.random.default_rng(7)
+    img = np.ones((400, 400, 3), dtype=np.uint8) * 255
+    texture = cv2.GaussianBlur(rng.integers(0, 200, size=(400, 400, 3), dtype=np.uint8), (7, 7), 0)
+    mask = np.zeros((400, 400), dtype=np.uint8)
+    cv2.fillPoly(mask, [np.array(
+        [[110, 130], [250, 120], [300, 210], [265, 300], [170, 315], [95, 245], [140, 200]],
+        np.int32)], 255)
+    img[mask > 0] = texture[mask > 0]
+
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    rasters = [s for s in shapes if s.shape_type == "complex" and s.crop is not None]
+    assert len(rasters) == 1, [(s.shape_type, s.bbox_px) for s in shapes]
+    assert rasters[0].bbox_px["w"] > 150 and rasters[0].bbox_px["h"] > 150
+
+
+def test_circle_touching_a_line_is_one_circle_not_two():
+    # A circle fused to a leader line fails the region gate (the contour is a snake),
+    # so it comes from the ellipse detector — which fits one ellipse per side of the
+    # drawn stroke and would otherwise emit two concentric circles for one drawn one.
+    img = make_canvas(400, 400)
+    cv2.circle(img, (200, 200), 90, (0, 0, 0), 2)
+    cv2.line(img, (290, 200), (390, 200), (0, 0, 0), 2)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    circles = [s for s in shapes if s.shape_type in ("circle", "ellipse")]
+    assert len(circles) == 1, [(s.shape_type, s.bbox_px) for s in shapes]
+    assert circles[0].bbox_px["w"] == pytest.approx(182, abs=12)
+
+
+def test_lsd_fallback_still_finds_the_box(monkeypatch):
+    # Three opencv distributions fight over site-packages/cv2 and only the contrib one
+    # carries ximgproc, so the fallback is a real code path, not defensive decoration.
+    import pipeline.shape_detector as sd
+    monkeypatch.setattr(sd, "HAVE_EDGE_DRAWING", False)
+    img = make_canvas(400, 400)
+    cv2.rectangle(img, (60, 60), (300, 220), (0, 0, 0), 2)
+    cv2.line(img, (300, 140), (380, 140), (0, 0, 0), 2)
+    shapes = detect_shapes(img, text_bboxes_px=[])
+    rects = [s for s in shapes if s.shape_type in ("rect", "square")]
+    assert len(rects) == 1, [s.shape_type for s in shapes]
 
 
 def test_residual_ink_produces_complex_shape():
