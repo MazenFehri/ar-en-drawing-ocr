@@ -8,55 +8,18 @@ from pipeline.shape_detector import ShapeResult
 from utils.bidi import detect_language, is_arabic
 
 
-# What separates a text-dense page from a drawing: prose wraps to the page width,
-# drawing labels never do. A detected line is "full width" when its box spans more
-# than this fraction of the page, and that many of them make the page prose.
-#
-# Measured on the *preprocessed* image over three real pages — test1.jpeg and
-# test2.jpeg are printed Arabic worksheets, class-diagram.png is a UML drawing:
-#
-#   signal                            test1   test2   class-diagram
-#   lines wider than 40% of the page      7       7               0
-#   lines wider than 25% of the page     11       8               0
-#   text area fraction                 0.31    0.20            0.08
-#   median text height (px)              15      14              27
-#   text/shape ratio                   35.0    1.75            1.07
-#
-# 7 / 7 / 0 against a minimum of 3 is a wide empty gap on both sides. The obvious
-# alternative, the text/shape ratio, was tried and rejected: 1.75 vs 1.07 does not
-# separate the populations at all.
-#
-# ponytail: tuned on three pages. The ceiling is that a drawing with a long title
-# block spanning the sheet, or a single-column worksheet set narrow, would land on
-# the wrong side of it. Upgrade path: the text area fraction above is a second
-# signal that separates just as cleanly (0.31 / 0.20 vs 0.08) and is independent of
-# line width — require both before calling a page "text" if one ever proves thin.
-FULL_WIDTH_LINE_FRACTION = 0.40
-FULL_WIDTH_LINE_MINIMUM = 3
-
 # Median detected text height below which recognition should not be trusted.
 #
-# Low-DPI scans don't degrade gracefully in Arabic, they fail in one specific way:
-# the dots that tell ق from ف and خ from ف are 1-2 pixels at this size, so they are
-# never sampled and the letter is a coin flip. Measured 15px and 14px on the two
-# worksheets (~45 DPI for a full page) against 27px on the drawing, so 20 flags both
-# worksheets and clears the drawing.
+# Low-DPI scans don't degrade gracefully in Arabic, they fail in one specific way: the
+# dots that tell ق from ف and خ from ف are 1-2 pixels at this size, so they are never
+# sampled and the letter becomes a coin flip. Measured 15px and 14px on two ~45 DPI
+# worksheets against 27px on a drawing that reads correctly, so 20 separates them.
+#
+# ponytail: height in pixels stands in for DPI, which the upload does not tell us —
+# fine while pages are whole scanned sheets, wrong for a tight crop of one large label.
+# Upgrade path if that turns up: divide by the page's longest side instead of using an
+# absolute count.
 LOW_RESOLUTION_TEXT_HEIGHT_PX = 20.0
-
-
-def classify_page(ocr_words: list[OcrWord], image_width: int) -> str:
-    """"text" for a prose page, "drawing" for a diagram — see FULL_WIDTH_LINE_FRACTION.
-
-    Decides whether the document is assembled as flowing paragraphs or as labels
-    pinned at their coordinates. Both are wrong for the other kind of page.
-    """
-    if not ocr_words or image_width <= 0:
-        return "drawing"
-    full_width = sum(
-        1 for w in ocr_words
-        if w.bbox_px["w"] / image_width > FULL_WIDTH_LINE_FRACTION
-    )
-    return "text" if full_width >= FULL_WIDTH_LINE_MINIMUM else "drawing"
 
 
 def median_text_height_px(ocr_words: list[OcrWord]) -> float:

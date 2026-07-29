@@ -80,9 +80,8 @@ _Z_TEXT = 251659264
 
 def assemble_document(
     elements: list[Element],
-    crop_images: Optional[dict[str, np.ndarray]] = None,
+    crop_images: dict[str, np.ndarray],
     page_aspect: Optional[float] = None,
-    flow_text: bool = False,
 ) -> bytes:
     """Assemble a Word document with absolutely positioned elements.
 
@@ -92,18 +91,8 @@ def assemble_document(
         letterboxed to this aspect ratio (and the page flips to landscape if
         the source is wider than tall) so shapes and bboxes aren't stretched.
         When None, keeps the legacy full-page stretch mapping unchanged.
-    flow_text: render ordinary flowing paragraphs instead of pinned textboxes.
-        The floating layout is right for a drawing (a label belongs *at* the
-        room it names) and wrong for a text-dense page — a printed Arabic
-        worksheet comes out as scattered unreadable fragments. See
-        _assemble_flowing. page_aspect is ignored in this mode: a flowing
-        document has no source rect to letterbox into.
     Returns: .docx file as bytes
     """
-    crop_images = crop_images or {}
-    if flow_text:
-        return _assemble_flowing(elements, crop_images)
-
     _counter = itertools.count(1)
     doc = Document()
     # Remove the default empty paragraph Word adds
@@ -144,89 +133,6 @@ def assemble_document(
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
-
-
-def _assemble_flowing(elements: list[Element], crop_images: dict[str, np.ndarray]) -> bytes:
-    """One ordinary Word paragraph per TextElement, in the order given.
-
-    The elements arrive already in reading order — layout_reconstructor's
-    _reading_order groups words into lines and reverses right-to-left ones —
-    so this must NOT re-sort them.
-
-    Nor must it touch the strings. utils/bidi.reshape_for_display exists for
-    rendering to a raster; here the recogniser's output is already in Unicode
-    logical order and Word runs its own bidi algorithm over a <w:bidi/>
-    paragraph. Reshaping or reversing would be a second correction on top of a
-    correct string, and the failure mode is silent: it still renders as Arabic,
-    just backwards.
-    """
-    doc = Document()
-    for p in list(doc.paragraphs):
-        p._element.getparent().remove(p._element)
-
-    for el in elements:
-        if isinstance(el, TextElement):
-            _add_flow_paragraph(doc, el.content, is_rtl=(el.language == "arabic"))
-        elif isinstance(el, ComplexShapeElement):
-            # A photo/chart inside a text document is real content, so it stays —
-            # inline, at its position in the reading order, rather than pinned.
-            crop = crop_images.get(el.id)
-            if crop is not None:
-                _add_flow_picture(doc, ndarray_to_png_bytes(crop))
-        # SimpleShapeElement / PolylineShapeElement are dropped. On a text-dense
-        # page these are table borders and answer-box rectangles, not diagram
-        # content; floating them over flowing paragraphs recreates precisely the
-        # scattered mess this mode exists to fix.
-        # ponytail: ceiling is that no table structure survives — a bordered
-        # table becomes a plain run of paragraphs, and a genuine diagram on a
-        # mostly-text page loses its line art. Upgrade path is to cluster the
-        # dropped rectangles into rows/columns and emit a real <w:tbl> instead
-        # of discarding them, if a caller ever needs the grid back.
-
-    buf = io.BytesIO()
-    doc.save(buf)
-    return buf.getvalue()
-
-
-def _add_flow_paragraph(doc: Document, text: str, is_rtl: bool) -> None:
-    """Append a normal <w:p>, RTL-marked when the text is Arabic.
-
-    Built as raw XML and appended to an empty paragraph rather than driven
-    through python-docx's API, because <w:bidi/> and <w:rtl/> have no accessor
-    there and both are order-sensitive within their parent (w:bidi precedes
-    w:jc in CT_PPr). Appending to a fresh empty w:p makes the order trivially
-    correct; add_paragraph() also guarantees the w:p lands *before* the body's
-    trailing w:sectPr, which a raw body.append() would not.
-    """
-    ns_w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
-    safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    jc = "right" if is_rtl else "left"
-    bidi_tag = "<w:bidi/>" if is_rtl else ""
-    rtl_tag = "<w:rtl/>" if is_rtl else ""
-
-    para = doc.add_paragraph()
-    para._p.append(etree.fromstring(f'<w:pPr {ns_w}>{bidi_tag}<w:jc w:val="{jc}"/></w:pPr>'))
-    para._p.append(etree.fromstring(
-        f'<w:r {ns_w}><w:rPr>{rtl_tag}</w:rPr>'
-        f'<w:t xml:space="preserve">{safe_text}</w:t></w:r>'
-    ))
-
-
-def _add_flow_picture(doc: Document, img_bytes: bytes) -> None:
-    """Append the crop as an inline picture in its own paragraph."""
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        f.write(img_bytes)
-        tmp_path = f.name
-    try:
-        shape = doc.add_picture(tmp_path)
-    finally:
-        os.unlink(tmp_path)
-    # add_picture uses the image's native pixel size at its native DPI, so a
-    # wide crop silently runs off the right margin. Scale down (never up) to the
-    # usable text width, keeping the aspect ratio.
-    if shape.width > _USE_W:
-        shape.height = int(shape.height * _USE_W / shape.width)
-        shape.width = _USE_W
 
 
 def _page_geometry(doc: Document, page_aspect: Optional[float]) -> tuple[int, int, int, int]:

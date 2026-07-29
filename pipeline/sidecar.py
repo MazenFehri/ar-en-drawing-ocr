@@ -12,7 +12,6 @@ def build_sidecar(
     quality_score: float | None = None,
     llm_status: dict | None = None,
     shape_label_status: dict | None = None,
-    document_type: str | None = None,
     median_text_height_px: float | None = None,
 ) -> dict:
     serialized = [_serialize(e) for e in elements]
@@ -46,21 +45,17 @@ def build_sidecar(
             # {"state": not_attempted|success|failed, "reason": str|None, "model": str|None}
             "llm_status": llm_status,
             "shape_label_status": shape_label_status,
-            # "text" or "drawing" — which layout the .docx was built with, since a
-            # prose page and a diagram get assembled completely differently.
-            "document_type": document_type,
             "median_text_height_px": median_text_height_px,
             # The honest "this page was too low-DPI to read reliably" signal. The
-            # confidences alone don't say it: the Arabic recogniser reports ~0.65 on
-            # a page whose letter dots were never sampled, which reads as merely
-            # mediocre rather than as guessing.
+            # confidences alone don't say it: the Arabic recogniser reports ~0.65 on a
+            # page whose letter dots were never sampled, which reads as merely mediocre
+            # rather than as guessing.
             #
-            # A height of 0.0 means no text was detected at all, which is not the same
-            # claim and must not be reported as one — a drawing with no labels is a
-            # normal input for this service, and telling its caller to go rescan a
-            # perfectly good sheet would make the flag useless. Falsy covers both that
-            # and the None an older caller passes; the caller can already see
-            # text_elements == 0 if it wants to distinguish "blank" from "fine".
+            # A height of 0.0 means no text was found at all, which is a different claim
+            # and is deliberately not reported as this one — a drawing with no labels is
+            # a normal input here, and telling its caller to go rescan a perfectly good
+            # sheet would make the flag worthless. Falsy covers that and the None an
+            # older caller passes; text_elements == 0 already distinguishes "blank".
             "low_resolution": bool(
                 median_text_height_px
                 and median_text_height_px < LOW_RESOLUTION_TEXT_HEIGHT_PX
