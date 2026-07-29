@@ -7,12 +7,14 @@ from pipeline.ocr import (
     ARABIC_ROUTING_CONFIDENCE,
     DET_MODEL,
     LATIN_REC_MODEL,
+    OCR_MIN_DIM_PX,
     OcrWord,
     _CROP_PAD_PX,
     _LANG_RECOGNISERS,
     _crop_polygon,
     _pick,
     _poly_bbox,
+    _upscale_for_ocr,
     run_ocr,
 )
 
@@ -73,7 +75,10 @@ def _wire(polys, latin=(), arabic=()):
     return fakes, requested, get_predictor
 
 
-IMAGE = np.ones((200, 300, 3), dtype=np.uint8) * 255
+# Longest side at OCR_MIN_DIM_PX exactly, so run_ocr's upscale is a no-op (scale 1.0) and
+# the polygons a fake detector reports come back as-is. A smaller page here would be
+# silently upscaled and every bbox assertion below would be off by that factor.
+IMAGE = np.ones((1000, OCR_MIN_DIM_PX, 3), dtype=np.uint8) * 255
 
 POLYS = [
     _quad(10, 20, 100, 25),
@@ -344,3 +349,57 @@ def test_a_dropped_crop_does_not_shift_the_remaining_words():
         words = run_ocr(IMAGE)
     assert [w.text for w in words] == ["KITCHEN"]
     assert words[0].bbox_px == {"x": 10, "y": 60, "w": 100, "h": 25}
+
+
+# --- low-DPI upscaling (see OCR_MIN_DIM_PX) --------------------------------------------
+
+
+def test_a_small_page_is_scaled_up_before_detection():
+    small = np.ones((200, 300, 3), dtype=np.uint8) * 255
+    upscaled, scale = _upscale_for_ocr(small)
+    assert scale == pytest.approx(OCR_MIN_DIM_PX / 300)
+    assert max(upscaled.shape[:2]) == OCR_MIN_DIM_PX
+
+
+def test_a_page_already_big_enough_is_not_touched():
+    big = np.ones((1200, OCR_MIN_DIM_PX + 400, 3), dtype=np.uint8) * 255
+    unchanged, scale = _upscale_for_ocr(big)
+    assert scale == 1.0
+    assert unchanged is big, "the normal path must not pay for a pointless resize"
+
+
+def test_upscaling_only_ever_enlarges():
+    """preprocessor.py owns downscaling; this must never fight it by shrinking too."""
+    for longest in (OCR_MIN_DIM_PX, OCR_MIN_DIM_PX + 1, 2000):
+        img = np.ones((100, longest, 3), dtype=np.uint8) * 255
+        out, scale = _upscale_for_ocr(img)
+        assert scale == 1.0 and out.shape == img.shape
+
+
+def test_boxes_from_an_upscaled_page_come_back_in_the_callers_coordinates():
+    """The upscale is an internal detail. A caller that hands in a 300px-wide page must
+    get boxes inside that 300px page — pipeline/__init__.py normalises them against the
+    *preprocessed* dimensions, so leaking upscaled pixels here would place every element
+    off-page in the .docx."""
+    small = np.ones((200, 300, 3), dtype=np.uint8) * 255
+    scale = OCR_MIN_DIM_PX / 300
+    # What the detector would report having seen the upscaled page.
+    _, _, get = _wire(
+        [_quad(10 * scale, 20 * scale, 100 * scale, 25 * scale)],
+        latin=[("entrance", 0.97)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(small)
+    assert len(words) == 1
+    box = words[0].bbox_px
+    assert box["x"] == pytest.approx(10, abs=1)
+    assert box["y"] == pytest.approx(20, abs=1)
+    assert box["w"] == pytest.approx(100, abs=1)
+    assert box["h"] == pytest.approx(25, abs=1)
+    assert box["x"] + box["w"] <= 300, "box must fit the page the caller passed in"
+
+
+def test_poly_bbox_divides_by_the_scale_it_was_given():
+    poly = np.array(_quad(40, 80, 200, 40), dtype=np.float32)
+    assert _poly_bbox(poly, 4.0) == {"x": 10, "y": 20, "w": 50, "h": 10}
+    assert _poly_bbox(poly) == _poly_bbox(poly, 1.0)

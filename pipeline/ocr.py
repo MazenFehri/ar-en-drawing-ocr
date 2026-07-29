@@ -69,6 +69,36 @@ DEFAULT_LANGUAGE_HINT = "ar+en"
 # under the 11.57s / 2.55s the two-pass v4 design cost.
 ARABIC_ROUTING_CONFIDENCE = 0.90
 
+# Longest side an image is scaled up to before detection, if it arrives smaller.
+#
+# Low-DPI scans are not merely "a bit worse" for Arabic, they fail in a specific way: the
+# marks that separate one letter from another are single dots, and at ~45 DPI a dot is one
+# or two pixels. Measured on a 375x533 scan of a school register (14-16px text lines), the
+# native-resolution read returned 157 Arabic characters at 0.651 mean confidence; the same
+# page cubic-upscaled 4x to 1500px returned 346 characters at 0.756, for +0.42s. The gain
+# is mostly recall — whole table rows that came back as 'ال' and 'ل  ا' at native size read
+# as real phrases once the recogniser is handed a crop it can resolve.
+#
+# Interpolation does not add information, so this cannot fix a dot that was never sampled:
+# the same page reads 'اللفب' for 'اللقب' at 1x, 2x, 3x and 4x alike. What it fixes is the
+# recogniser's own downstream resize — a 14px line scaled up to the 48px input height is
+# reconstructing from almost nothing, and doing that step once, well, with INTER_CUBIC on
+# the whole page beats letting it happen per-crop on a strip.
+#
+# This deliberately does NOT live in pipeline/preprocessor.py. That module's output is the
+# coordinate space for shape detection, and pipeline/shape_detector.py is tuned throughout
+# in absolute pixels (MIN_AREA_PX, RECT_MIN_SIDE_PX, ELLIPSE_MIN_AXIS_PX, ...) against
+# images at native scale — scaling the page under it would redefine every one of those
+# thresholds by the same factor, silently. Boxes are divided back down before they leave
+# run_ocr, so nothing outside this module sees the upscaled space.
+#
+# ponytail: one number, chosen from a 1x/2x/3x/4x sweep on one low-DPI page — 4x scored
+# best there and 1500 is what 4x came to. Images already at or above it are untouched, so
+# the normal path is unaffected. Upgrade path if this matters more: scale by measured text
+# height (run detection once at native size, take the median box height, target ~48px)
+# rather than by page size, which would also stop a large page of tiny text falling through.
+OCR_MIN_DIM_PX = 1500
+
 # A crop this much taller than it is wide is vertical text; rotate it upright before
 # recognition. This is PaddleOCR's own convention from get_rotate_crop_image, kept because
 # the 3-model design has no text-line orientation classifier to do it properly.
@@ -104,6 +134,9 @@ def run_ocr(
     recognisers = _LANG_RECOGNISERS.get(
         language_hint, _LANG_RECOGNISERS[DEFAULT_LANGUAGE_HINT]
     )
+    # Everything from here to _poly_bbox works in upscaled pixels; the caller never sees
+    # them. See OCR_MIN_DIM_PX.
+    image, scale = _upscale_for_ocr(image)
     polys = _detect(image)
     if not polys:
         return []
@@ -142,7 +175,7 @@ def run_ocr(
         words.append(OcrWord(
             text=text,
             confidence=conf,
-            bbox_px=_poly_bbox(polys[i]),
+            bbox_px=_poly_bbox(polys[i], scale),
             flagged=conf < confidence_threshold,
         ))
     # Top-to-bottom, left-to-right, so the output order is a property of the page rather
@@ -216,9 +249,24 @@ def _field(result, key: str):
         return getattr(result, key, None)
 
 
-def _poly_bbox(poly: np.ndarray) -> dict:
-    """Axis-aligned {x, y, w, h} around a detection polygon."""
-    xs, ys = poly[:, 0], poly[:, 1]
+def _upscale_for_ocr(image: np.ndarray) -> tuple[np.ndarray, float]:
+    """Scale a small page up to OCR_MIN_DIM_PX. Returns the image and the factor applied.
+
+    Only ever enlarges — pipeline/preprocessor.py already caps the longest side, so an
+    image at or above the target passes through untouched at scale 1.0 and the normal path
+    pays nothing.
+    """
+    longest = max(image.shape[:2])
+    if longest >= OCR_MIN_DIM_PX:
+        return image, 1.0
+    scale = OCR_MIN_DIM_PX / longest
+    upscaled = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    return upscaled, scale
+
+
+def _poly_bbox(poly: np.ndarray, scale: float = 1.0) -> dict:
+    """Axis-aligned {x, y, w, h} around a detection polygon, in pre-upscale pixels."""
+    xs, ys = poly[:, 0] / scale, poly[:, 1] / scale
     x, y = int(np.floor(xs.min())), int(np.floor(ys.min()))
     return {
         "x": max(x, 0),
