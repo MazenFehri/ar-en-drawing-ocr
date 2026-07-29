@@ -20,7 +20,7 @@ No local Python or PostgreSQL setup required.
 docker compose up --build
 ```
 
-First build downloads PaddleOCR Arabic model weights (~200 MB). Subsequent starts are fast.
+The build bakes in the three model weights (~31 MB total). Subsequent starts are fast.
 
 ```bash
 # Verify it's up
@@ -48,7 +48,8 @@ source .venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
 ```
 
-> PaddleOCR downloads Arabic model weights (~200 MB) automatically on first use.
+> PaddleOCR downloads the three model weights (~31 MB total) automatically on first use,
+> into `~/.paddlex/official_models`.
 
 ### 3. Configure environment
 
@@ -228,13 +229,21 @@ curl -X POST http://localhost:8000/feedback \
 ## Architecture
 
 ```
-image → preprocess → layout segmentation → shape detection
-      → OCR (PaddleOCR PP-OCRv4) → LLM correction (vision model via OpenRouter)
+image → preprocess → OCR (one detection pass, per-crop recognition) → shape detection
+      → LLM correction (vision model via OpenRouter)
       → layout reconstruction → Word assembly → JSON sidecar
 ```
 
-- **OCR:** PaddleOCR PP-OCRv4, Arabic + English, runs locally
-- **Layout:** PaddleOCR PP-Structure region segmentation
+- **OCR:** PaddleOCR 3.7, running three models directly rather than a bundled pipeline.
+  `PP-OCRv6_tiny_det` segments the page **once** (it is language-agnostic); each detected
+  polygon is then perspective-cropped and read by `PP-OCRv6_small_rec`, with
+  `arabic_PP-OCRv5_mobile_rec` re-reading only the crops whose Latin confidence fell
+  below 0.90 (~2/89 on class-diagram, 5/12 on sample_drawing). The winner per crop is
+  chosen by script, not by confidence — the Arabic model mangles Latin while still
+  scoring it highly, so it only wins when it actually returned Arabic.
+  This replaced two full detect+rec passes whose disagreeing segmentations had to be
+  reconciled by a bbox-overlap union-find; with one segmentation there is nothing to
+  merge, and that code is gone.
 - **LLM correction:** OpenRouter free vision model (configurable, optional)
 - **Shape detection:** OpenCV contour analysis with `RETR_CCOMP` so nested content
   (interior walls, fixtures, furniture inside a room outline) survives — `RETR_EXTERNAL`
@@ -248,41 +257,53 @@ image → preprocess → layout segmentation → shape detection
 - **Word output:** Absolutely positioned DrawingML objects (text boxes, shapes, embedded images).
   Simple shapes render outline-only — Word's default shape style is a solid blue fill, which
   would hide the text underneath.
-- **Arabic text:** PaddleOCR reports Arabic in *visual* order (the order glyphs sit on
-  the page). `utils.bidi.to_logical_order` converts it back to logical order before it
-  reaches the sidecar or Word — without that, `<w:bidi/>` reverses it a second time and
-  it renders backwards. Reading order groups words into lines and sorts each line in
-  its own direction, right-to-left for Arabic.
+- **Arabic text:** `arabic_PP-OCRv5_mobile_rec` returns whole phrases already in
+  *logical* (Unicode storage) order, which is what the sidecar and Word both want, so the
+  pipeline does **no** bidi reordering. Under PP-OCRv4 it did: that model emitted visual
+  order (the order glyphs sit on the page) and `utils.bidi.to_logical_order` reversed it.
+  That function is deleted — applying it now would be a second correction on a correct
+  string and would silently ship reversed Arabic. Reading order still groups words into
+  lines and sorts each line in its own direction, right-to-left for Arabic.
 - **Storage:** PostgreSQL via asyncpg for correction feedback
 
 ## Troubleshooting
 
-**`SIGILL` / `Illegal instruction` crash when a model loads.**
-PaddlePaddle 2.6.x's inference optimizer emits AVX-512 instructions, which Intel
-12th/13th/14th-gen consumer CPUs (Alder Lake / Raptor Lake) do not have. This is
-handled in `pipeline/_paddle_patch.py`, which disables Paddle IR optimization so
-inference falls back to AVX2 kernels. Keep that import in the model loaders.
+**`NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support ...` at
+`onednn_instruction.cc:116` when a model runs.**
+Stock paddle 3.3.1 is dead on CPUs without AVX-512 (Intel 12th/13th/14th-gen consumer
+parts — Alder Lake / Raptor Lake — have it fused off). The **only** fix that works is
+passing `enable_mkldnn=False` to every `TextDetection` / `TextRecognition` constructor,
+which `pipeline/ocr.py` does. Verified not to help: `ir_optim=False`, the
+`FLAGS_enable_pir_api=0` env var, and the `FLAGS_use_mkldnn=0` env var (silently ignored
+by paddle 3.x, which is why it is no longer set in the Dockerfile). Miss one constructor
+and it is an immediate hard crash, not a slow path.
 
-**First request is very slow (minutes), later ones are fast (~8–12s).**
-On first use PaddleOCR/PP-Structure download model weights (~35 MB) from a slow
-CDN. They are cached in the `paddle_models` Docker volume, so this only happens
-once — even across `docker compose up --build`. (Running `docker compose down -v`
-wipes the volume and forces a re-download.)
+The older `SIGILL` / `Illegal instruction` crash on this hardware was a paddle 2.6.x
+problem (Paddle#76111) handled by a `pipeline/_paddle_patch.py` monkeypatch. It does not
+reproduce on 3.3.1, and that module is deleted.
 
-**`opencv-python` dependency conflict on build.**
-`paddleocr 2.7.3` requires `opencv-python<=4.6.0.66`; the pin in
-`requirements.txt` matches this.
+**First request is slow (~6s), later ones are faster.**
+Model weights (~31 MB for the three models) are baked into the image and cached in the
+`paddlex_models` Docker volume at `~/.paddlex/official_models`, so they are not
+re-downloaded. The first request still pays predictor construction. Note the cache path
+moved from 2.x's `~/.paddleocr`; the volume was renamed alongside it, because a volume
+holding the old v4 weights would have been mounted over the new ones rather than
+re-seeded. (Never run `docker compose down -v` to clean up — it also drops `pgdata`.)
 
-**Why WebP uploads are rejected (HTTP 400).**
-That same pin holds `opencv-python` at 4.6.0.66, which bundles a libwebp carrying
-CVE-2023-4863 — a heap buffer overflow that was exploited in the wild. Since the
-service decodes untrusted uploads, WebP is refused at the boundary by checking the
-`RIFF....WEBP` magic bytes, not the `Content-Type` header: `cv2.imdecode` detects
-format from content, so a crafted WebP sent as `image/png` would otherwise still
-reach the vulnerable decoder. Remove the check once a paddleocr upgrade frees the
-opencv pin.
+**opencv.** There is exactly one opencv distribution now: paddlex requires
+`opencv-contrib-python==4.10.0.84` and nothing else in the graph wants an opencv, so
+`requirements.txt` pins none. Under 2.7.3 three distributions fought over
+`site-packages/cv2` and install order decided which won. `cv2.ximgproc.createEdgeDrawing`
+(needed by `pipeline/shape_detector.py`) is therefore present by construction; the
+Dockerfile still asserts it at build time.
 
-**Known unpatchable advisories.** `paddlepaddle 2.6.2` carries two command-injection
-advisories (PYSEC-2026-1754/-1756) fixed only on the 3.x line, which requires the
-paddleocr 3.x migration. `Pillow 10.3.0` has open advisories and should be bumped;
-nothing in the pinned tree constrains it, so this is safe to do inside a Docker build.
+**Why WebP uploads are still rejected (HTTP 400).**
+No longer a live mitigation: opencv 4.10.0.84 carries a libwebp with CVE-2023-4863 fixed
+(the fix landed in 4.8.1.78). The guard is kept as defence-in-depth — WebP is not a
+format architectural drawings arrive in, so refusing it costs nothing, and it is checked
+by `RIFF....WEBP` magic bytes rather than `Content-Type`, because `cv2.imdecode` detects
+format from content.
+
+**Known advisories.** The two `paddlepaddle 2.6.2` command-injection advisories
+(PYSEC-2026-1754/-1756) are resolved by this migration — they were fixed on the 3.x line,
+and the tree is now on `paddlepaddle 3.3.1`.
