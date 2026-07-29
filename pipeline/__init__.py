@@ -4,7 +4,6 @@ import numpy as np
 import cv2
 
 from pipeline.preprocessor import preprocess, detect_quality
-from pipeline.layout import segment_layout
 from pipeline.shape_detector import detect_shapes
 from pipeline.ocr import run_ocr, DEFAULT_LANGUAGE_HINT
 from pipeline.llm_corrector import apply_corrections, label_complex_shapes, TOTAL_LLM_BUDGET_SECONDS
@@ -49,26 +48,33 @@ def process_image(
     preprocessed = preprocess(image)
     img_h, img_w = preprocessed.shape[:2]
 
-    # Stage 2: Layout segmentation
-    regions = segment_layout(preprocessed)
-    text_region_bboxes = [r.bbox_px for r in regions if r.region_type == "text"]
-
-    # Stage 3: OCR — runs before shape detection so its word boxes can mask text.
+    # Stage 2: OCR — runs before shape detection so its word boxes can mask text.
+    #
+    # There used to be a PP-Structure layout-segmentation stage here, feeding
+    # `text_region_bboxes` into detect_shapes alongside the OCR word boxes.
+    # Measured on both test images: it returned exactly one region, of type
+    # "figure", so the text-region list it produced was always empty — 5.27s on
+    # class-diagram.png and 1.15s on sample_drawing.png buying literally nothing,
+    # plus a third model's weights in the image. tests/test_pipeline.py had
+    # already been patching it to return [] for every test, which is the same
+    # observation written down a different way.
+    #
+    # ponytail: measured on two images, not proven for every input. If a real
+    # scan ever needs region masking that OCR word boxes don't already give,
+    # PP-Structure is one `git revert` away — but note the masking it fed was
+    # belt-and-braces over the word boxes, and text OCR missed entirely isn't in
+    # the document anyway, so masking it would only erase drawing ink.
     words = run_ocr(preprocessed, confidence_threshold=threshold, language_hint=language_hint)
 
-    # Stage 4: Shape detection. Mask both the layout text regions and the actual
-    # OCR word boxes; without the word boxes every glyph cluster the layout model
-    # missed comes back as a "complex" shape and gets duplicated into the document.
-    shapes = detect_shapes(
-        preprocessed,
-        text_bboxes_px=text_region_bboxes + [w.bbox_px for w in words],
-    )
+    # Stage 3: Shape detection. Mask the OCR word boxes; without them every glyph
+    # cluster comes back as a "complex" shape and gets duplicated into the document.
+    shapes = detect_shapes(preprocessed, text_bboxes_px=[w.bbox_px for w in words])
 
-    # Stage 5: Layout reconstruction (pixel -> relative coords, reading order)
+    # Stage 4: Layout reconstruction (pixel -> relative coords, reading order)
     elements = reconstruct_layout(words, shapes, img_w, img_h)
 
-    # Stage 6: LLM correction for flagged words. One deadline computed here and
-    # passed into both this call and stage 6b's label_complex_shapes below —
+    # Stage 5: LLM correction for flagged words. One deadline computed here and
+    # passed into both this call and stage 5b's label_complex_shapes below —
     # without that they'd each get their own full TOTAL_LLM_BUDGET_SECONDS,
     # doubling the worst-case wait for a request that hits both. See the
     # comment on TOTAL_LLM_BUDGET_SECONDS in pipeline/llm_corrector.py.
@@ -92,7 +98,7 @@ def process_image(
         if shape.shape_type == "complex" and shape.crop is not None:
             crop_images[f"shape_{j:03d}"] = shape.crop
 
-    # Stage 6b: name the complex shapes, so the sidecar says "door swing" not "unknown"
+    # Stage 5b: name the complex shapes, so the sidecar says "door swing" not "unknown"
     shape_status = {"state": "not_attempted", "reason": "no_shapes_to_label", "model": None}
     if want_labels and crop_images:
         elements, shape_status = label_complex_shapes(
@@ -101,14 +107,14 @@ def process_image(
             deadline=llm_deadline,
         )
 
-    # Stage 7: Word assembly. Pass the *original* aspect ratio so the page is
+    # Stage 6: Word assembly. Pass the *original* aspect ratio so the page is
     # letterboxed to match the source — bboxes are relative fractions, and mapping
     # x by page width and y by page height independently stretches the drawing.
     docx_bytes = assemble_document(
         elements, crop_images=crop_images, page_aspect=orig_w / orig_h,
     )
 
-    # Stage 8: JSON sidecar
+    # Stage 7: JSON sidecar
     elapsed_ms = int((time.time() - start) * 1000)
     sidecar = build_sidecar(
         elements, orig_w, orig_h, elapsed_ms,

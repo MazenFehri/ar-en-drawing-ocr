@@ -30,8 +30,7 @@ def _restore_log_level():
 
     Confirmed live (traced logging.Logger.setLevel calls in the running container,
     since a bare `import paddle` reliably SIGABRTs/SIGSEGVs in a throwaway process
-    on this box): loading either model — PPStructure via pipeline/layout.py or
-    PaddleOCR via pipeline/ocr.py — imports pipeline/_paddle_patch.py, which does
+    on this box): loading a model via pipeline/ocr.py imports pipeline/_paddle_patch.py, which does
     `import paddle.inference`, which transitively imports paddle.distributed
     submodules. Two of those (paddle/distributed/utils/launch_utils.py and
     paddle/distributed/fleet/meta_parallel/sharding/group_sharded_stage2.py) call

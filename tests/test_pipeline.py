@@ -16,10 +16,9 @@ FAKE_OCR_WORD = MagicMock(
 @patch("pipeline.apply_corrections", return_value=([], NOT_ATTEMPTED))
 @patch("pipeline.detect_shapes")
 @patch("pipeline.run_ocr", return_value=[FAKE_OCR_WORD])
-@patch("pipeline.segment_layout", return_value=[])
 @patch("pipeline.preprocess", side_effect=lambda x: x)
 def test_word_correction_cannot_spend_the_whole_shared_llm_budget(
-    mock_pre, mock_layout, mock_ocr, mock_shapes, mock_llm, mock_labels
+    mock_pre, mock_ocr, mock_shapes, mock_llm, mock_labels
 ):
     """Both LLM stages share one budget, so word correction (which runs first)
     could otherwise consume all of it and leave shape labelling nothing — that
@@ -50,10 +49,9 @@ def test_word_correction_cannot_spend_the_whole_shared_llm_budget(
 @patch("pipeline.apply_corrections", return_value=([], NOT_ATTEMPTED))
 @patch("pipeline.detect_shapes", return_value=[])
 @patch("pipeline.run_ocr", return_value=[FAKE_OCR_WORD])
-@patch("pipeline.segment_layout", return_value=[])
 @patch("pipeline.preprocess", side_effect=lambda x: x)
 def test_process_image_returns_pipeline_result(
-    mock_pre, mock_layout, mock_ocr, mock_shapes, mock_llm
+    mock_pre, mock_ocr, mock_shapes, mock_llm
 ):
     img = np.ones((400, 600, 3), dtype=np.uint8) * 255
     result = process_image(img)
@@ -65,10 +63,9 @@ def test_process_image_returns_pipeline_result(
 @patch("pipeline.apply_corrections", return_value=([], NOT_ATTEMPTED))
 @patch("pipeline.detect_shapes", return_value=[])
 @patch("pipeline.run_ocr", return_value=[FAKE_OCR_WORD])
-@patch("pipeline.segment_layout", return_value=[])
 @patch("pipeline.preprocess", side_effect=lambda x: x)
 def test_process_image_sidecar_page_dimensions(
-    mock_pre, mock_layout, mock_ocr, mock_shapes, mock_llm
+    mock_pre, mock_ocr, mock_shapes, mock_llm
 ):
     img = np.ones((400, 600, 3), dtype=np.uint8) * 255
     result = process_image(img)
@@ -79,10 +76,9 @@ def test_process_image_sidecar_page_dimensions(
 @patch("pipeline.apply_corrections", return_value=([], NOT_ATTEMPTED))
 @patch("pipeline.detect_shapes", return_value=[])
 @patch("pipeline.run_ocr", return_value=[])
-@patch("pipeline.segment_layout", return_value=[])
 @patch("pipeline.preprocess", side_effect=lambda x: x)
 def test_process_image_empty_elements(
-    mock_pre, mock_layout, mock_ocr, mock_shapes, mock_llm
+    mock_pre, mock_ocr, mock_shapes, mock_llm
 ):
     img = np.ones((400, 600, 3), dtype=np.uint8) * 255
     result = process_image(img)
