@@ -331,3 +331,141 @@ def test_document_with_varied_box_heights_is_valid_zip_and_xml():
     assert zf.testzip() is None  # valid zip, no corrupt members
     xml_bytes = zf.read("word/document.xml")
     ET.fromstring(xml_bytes)  # raises if malformed
+
+
+# --- flow_text mode -------------------------------------------------------
+# The pinned-textbox layout is right for a drawing and wrong for a text-dense
+# page (a printed Arabic worksheet came out as scattered fragments), so
+# assemble_document grew a second rendering mode.
+
+def _flow_paragraphs(docx_bytes):
+    """(text, paragraph XML) per paragraph, in document order."""
+    doc = Document(io.BytesIO(docx_bytes))
+    return [(p.text, p._p.xml) for p in doc.paragraphs]
+
+
+def test_flow_arabic_paragraph_is_marked_rtl():
+    # <w:bidi/> on the paragraph and <w:rtl/> on the run are what make Word
+    # run its bidi algorithm and lay the line out right-to-left. Without both,
+    # Arabic renders left-aligned and mis-ordered around any latin/digit runs.
+    arabic = "غرفة النوم في الطابق الأول"
+    result = assemble_document([make_text_el("t0", arabic, lang="arabic")],
+                               crop_images={}, flow_text=True)
+    (text, xml), = _flow_paragraphs(result)
+    assert text == arabic  # not reshaped, not reversed - still logical order
+    assert "<w:bidi/>" in xml
+    assert "<w:rtl/>" in xml
+    assert 'w:val="right"' in xml
+
+
+def test_flow_english_paragraph_is_not_marked_rtl():
+    result = assemble_document([make_text_el("t0", "ground floor plan")],
+                               crop_images={}, flow_text=True)
+    (text, xml), = _flow_paragraphs(result)
+    assert text == "ground floor plan"
+    assert "<w:bidi/>" not in xml
+    assert "<w:rtl/>" not in xml
+    assert 'w:val="left"' in xml
+
+
+def test_flow_mixed_language_paragraph_stays_ltr():
+    result = assemble_document([make_text_el("t0", "غرفة 12A", lang="mixed")],
+                               crop_images={}, flow_text=True)
+    (_, xml), = _flow_paragraphs(result)
+    assert "<w:bidi/>" not in xml
+    assert "<w:rtl/>" not in xml
+
+
+def test_flow_preserves_element_order():
+    # layout_reconstructor._reading_order has already grouped words into lines
+    # and reversed the right-to-left ones. Re-sorting here would undo that.
+    elements = [
+        make_text_el("t0", "third", x=0.9, y=0.9),
+        make_text_el("t1", "first", x=0.0, y=0.0),
+        make_text_el("t2", "second", x=0.5, y=0.1),
+    ]
+    result = assemble_document(elements, crop_images={}, flow_text=True)
+    assert [t for t, _ in _flow_paragraphs(result)] == ["third", "first", "second"]
+
+
+def test_flow_drops_simple_and_polyline_shapes_but_default_mode_keeps_them():
+    # On a text-dense page these are table borders and answer-box rectangles.
+    # Floating them over flowing paragraphs recreates the mess this mode fixes.
+    elements = [
+        make_text_el("t0", "question one"),
+        SimpleShapeElement(id="s0", bbox=BBox(x=0.1, y=0.3, w=0.8, h=0.1),
+                           shape="rect", confidence=0.9),
+        _polyline_el([(0.0, 0.0), (1.0, 0.0)]),
+    ]
+    flowed = Document(io.BytesIO(
+        assemble_document(elements, crop_images={}, flow_text=True))).element.body.xml
+    assert "<a:prstGeom" not in flowed
+    assert "<a:custGeom>" not in flowed
+    assert "<wp:anchor" not in flowed  # nothing floating at all
+
+    # Same elements, default mode: both shapes are still emitted.
+    pinned = Document(io.BytesIO(
+        assemble_document(elements, crop_images={}))).element.body.xml
+    assert "<a:prstGeom" in pinned
+    assert "<a:custGeom>" in pinned
+
+
+def test_flow_keeps_complex_shape_crops_as_inline_pictures():
+    # A photo or chart inside a text document is legitimate content, so unlike
+    # the line art it survives - inline, at its place in the reading order.
+    crop = np.ones((50, 80, 3), dtype=np.uint8) * 128
+    elements = [
+        make_text_el("t0", "see figure"),
+        ComplexShapeElement(id="cs0", bbox=BBox(x=0.2, y=0.4, w=0.5, h=0.3)),
+        make_text_el("t1", "as shown above"),
+    ]
+    result = assemble_document(elements, crop_images={"cs0": crop}, flow_text=True)
+    body = Document(io.BytesIO(result)).element.body.xml
+    assert "<pic:pic" in body
+    assert "<wp:inline" in body and "<wp:anchor" not in body
+    # Picture sits between the two paragraphs, not appended at the end.
+    assert [t for t, _ in _flow_paragraphs(result)] == ["see figure", "", "as shown above"]
+
+
+def test_flow_wide_crop_is_scaled_down_to_the_usable_page_width():
+    # add_picture uses the image's native size, so a wide crop would run off
+    # the right margin.
+    from pipeline.word_assembler import _USE_W
+    crop = np.ones((400, 2000, 3), dtype=np.uint8) * 200
+    result = assemble_document([ComplexShapeElement(id="cs0", bbox=BBox(x=0, y=0, w=1, h=1))],
+                               crop_images={"cs0": crop}, flow_text=True)
+    shape = Document(io.BytesIO(result)).inline_shapes[0]
+    assert shape.width == _USE_W
+    assert shape.height == pytest.approx(_USE_W * 400 / 2000, rel=1e-3)
+
+
+def test_flow_document_is_valid_zip_and_xml():
+    import zipfile
+    from lxml import etree as ET
+
+    crop = np.ones((30, 30, 3), dtype=np.uint8) * 90
+    elements = [
+        make_text_el("t0", "ورقة عمل"),  # arabic content but language=english
+        make_text_el("t1", "الرجاء الإجابة عن الأسئلة", lang="arabic"),
+        make_text_el("t2", "Name & class <here>"),  # XML special chars
+        SimpleShapeElement(id="s0", bbox=BBox(x=0.1, y=0.5, w=0.8, h=0.1),
+                           shape="rect", confidence=0.9),
+        ComplexShapeElement(id="cs0", bbox=BBox(x=0.2, y=0.7, w=0.3, h=0.2)),
+    ]
+    result = assemble_document(elements, crop_images={"cs0": crop}, flow_text=True)
+    zf = zipfile.ZipFile(io.BytesIO(result))
+    assert zf.testzip() is None
+    ET.fromstring(zf.read("word/document.xml"))
+    assert _flow_paragraphs(result)[2][0] == "Name & class <here>"
+
+
+def test_flow_text_defaults_to_false_and_leaves_the_pinned_layout_alone():
+    # The default must stay the absolutely-positioned mode. Guard the two call
+    # shapes callers use (with and without the keyword) against drift.
+    elements = [make_text_el("t0", "entrance"),
+                SimpleShapeElement(id="s0", bbox=BBox(x=0.3, y=0.2, w=0.1, h=0.1),
+                                   shape="circle", confidence=0.9)]
+    implicit = assemble_document(elements, crop_images={})
+    explicit = assemble_document(elements, crop_images={}, flow_text=False)
+    assert implicit == explicit
+    assert "<wp:anchor" in Document(io.BytesIO(implicit)).element.body.xml

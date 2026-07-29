@@ -5,6 +5,7 @@ from models.elements import (
     LLMCorrection,
 )
 from pipeline.sidecar import build_sidecar
+from pipeline.layout_reconstructor import LOW_RESOLUTION_TEXT_HEIGHT_PX
 
 
 def test_sidecar_carries_quality_score():
@@ -88,6 +89,31 @@ def test_sidecar_polyline_shape_fields():
     json.dumps(result)
 
 
+def test_sidecar_carries_page_classification():
+    side = build_sidecar([], 1000, 1500, 5, document_type="text", median_text_height_px=15.0)
+    assert side["stats"]["document_type"] == "text"
+    assert side["stats"]["median_text_height_px"] == 15.0
+
+
+def test_low_resolution_flips_at_the_threshold():
+    """15px and 14px are the two worksheets; 27px is the drawing."""
+    below = build_sidecar([], 1000, 1500, 5,
+                          median_text_height_px=LOW_RESOLUTION_TEXT_HEIGHT_PX - 0.1)
+    at = build_sidecar([], 1000, 1500, 5,
+                       median_text_height_px=LOW_RESOLUTION_TEXT_HEIGHT_PX)
+    assert below["stats"]["low_resolution"] is True
+    assert at["stats"]["low_resolution"] is False
+
+
+def test_sidecar_without_classification_stays_backward_compatible():
+    """Old callers pass neither field; low_resolution must not claim a page was
+    unreadable just because nobody measured it."""
+    stats = build_sidecar([], 1000, 1500, 5)["stats"]
+    assert stats["document_type"] is None
+    assert stats["median_text_height_px"] is None
+    assert stats["low_resolution"] is False
+
+
 def test_sidecar_complex_shape_fields():
     elements = [
         ComplexShapeElement(id="cs0", bbox=BBox(x=0.5, y=0.3, w=0.15, h=0.1),
@@ -98,3 +124,12 @@ def test_sidecar_complex_shape_fields():
     assert el["type"] == "complex_shape"
     assert el["llm_label"] == "door swing"
     assert el["embedded_as"] == "image"
+
+
+def test_a_page_with_no_text_is_not_reported_as_low_resolution():
+    """0.0 means "no text found", not "text too small to read". A drawing with no
+    labels is a normal input here, and flagging it would tell the caller to go rescan
+    a sheet that is perfectly fine."""
+    stats = build_sidecar([], 800, 600, 10, median_text_height_px=0.0)["stats"]
+    assert stats["low_resolution"] is False
+    assert stats["median_text_height_px"] == 0.0

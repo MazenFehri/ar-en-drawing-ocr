@@ -1,5 +1,8 @@
 import pytest
-from pipeline.layout_reconstructor import reconstruct_layout, to_relative_bbox
+from pipeline.layout_reconstructor import (
+    reconstruct_layout, to_relative_bbox, classify_page, median_text_height_px,
+    FULL_WIDTH_LINE_FRACTION, FULL_WIDTH_LINE_MINIMUM,
+)
 from pipeline.ocr import OcrWord
 from pipeline.shape_detector import ShapeResult
 from models.elements import BBox, TextElement, SimpleShapeElement, ComplexShapeElement
@@ -145,6 +148,50 @@ def test_word_in_nested_shapes_picks_innermost():
     elements = reconstruct_layout([word], [outer, inner], IMG_W, IMG_H)
     text_el = next(e for e in elements if isinstance(e, TextElement))
     assert text_el.container_shape_id == "shape_001"  # the smaller, inner box
+
+
+def test_page_of_short_labels_is_a_drawing():
+    """class-diagram.png shape: 0 lines wider than 40% of the page."""
+    words = [make_word(f"+field_{i}", 100, 50 + i * 40, w=120, h=27) for i in range(20)]
+    assert classify_page(words, IMG_W) == "drawing"
+
+
+def test_page_of_full_width_lines_is_text():
+    """The worksheets' shape: 7 lines spanning most of the page width."""
+    words = [make_word(f"line {i}", 60, 50 + i * 40, w=800, h=15) for i in range(7)]
+    assert classify_page(words, IMG_W) == "text"
+
+
+def test_a_couple_of_wide_lines_is_still_a_drawing():
+    """A drawing's title block is wide but there is only one of it — the minimum
+    line count, not the width alone, is what does the separating."""
+    wide = [make_word("a wide title block", 60, 50, w=800, h=27)
+            for _ in range(FULL_WIDTH_LINE_MINIMUM - 1)]
+    narrow = [make_word("label", 100, 200 + i * 40, w=120, h=27) for i in range(15)]
+    assert classify_page(wide + narrow, IMG_W) == "drawing"
+
+
+def test_classify_page_on_no_words_is_a_drawing():
+    assert classify_page([], IMG_W) == "drawing"
+
+
+def test_classify_page_boundary_is_strictly_wider_than_the_fraction():
+    at_threshold = [make_word("x", 0, i * 40, w=int(IMG_W * FULL_WIDTH_LINE_FRACTION), h=15)
+                    for i in range(10)]
+    assert classify_page(at_threshold, IMG_W) == "drawing"
+    over = [make_word("x", 0, i * 40, w=int(IMG_W * FULL_WIDTH_LINE_FRACTION) + 5, h=15)
+            for i in range(10)]
+    assert classify_page(over, IMG_W) == "text"
+
+
+def test_median_text_height_of_no_words_is_zero():
+    assert median_text_height_px([]) == 0.0
+
+
+def test_median_text_height_is_the_median_not_the_mean():
+    words = [make_word("a", 0, 0, h=14), make_word("b", 0, 40, h=15),
+             make_word("c", 0, 80, h=200)]
+    assert median_text_height_px(words) == 15.0
 
 
 def test_word_partially_overlapping_shape_is_not_contained():
