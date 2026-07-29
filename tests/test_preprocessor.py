@@ -65,3 +65,29 @@ def test_deskew_still_corrects_real_skew():
     M = cv2.getRotationMatrix2D((300, 200), 6.0, 1.0)
     skewed = cv2.warpAffine(img, M, (600, 400), borderMode=cv2.BORDER_REPLICATE)
     assert _deskew(skewed) is not skewed   # a plausible skew is acted on
+
+
+def test_preprocess_does_not_enhance_contrast_but_the_helper_still_exists():
+    """OCR reads the un-enhanced page; shape detection applies enhance_contrast itself.
+    If CLAHE ever creeps back into preprocess() both stages get it again and OCR silently
+    loses accuracy (measured 0.9066 -> 0.8955)."""
+    from pipeline.preprocessor import preprocess, enhance_contrast
+    # A low-contrast page: CLAHE stretches it noticeably, so an unenhanced result is
+    # distinguishable from an enhanced one.
+    img = np.full((80, 120, 3), 128, dtype=np.uint8)
+    img[30:50, 20:100] = 110
+    out = preprocess(img)
+    assert not np.array_equal(out, enhance_contrast(out)), (
+        "test image is too flat to tell enhanced from unenhanced; pick another"
+    )
+    # preprocess must be denoise-terminated, not CLAHE-terminated.
+    from pipeline.preprocessor import downscale, _deskew, _denoise
+    assert np.array_equal(out, _denoise(_deskew(downscale(img))))
+
+
+def test_enhance_contrast_preserves_shape_so_coordinates_stay_valid():
+    """Shape boxes are compared against OCR word boxes from the *un*enhanced page, so
+    this must not resize or crop."""
+    from pipeline.preprocessor import enhance_contrast
+    img = np.random.randint(0, 255, (57, 91, 3), dtype=np.uint8)
+    assert enhance_contrast(img).shape == img.shape

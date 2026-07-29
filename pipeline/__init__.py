@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 import cv2
 
-from pipeline.preprocessor import preprocess, detect_quality
+from pipeline.preprocessor import preprocess, detect_quality, enhance_contrast
 from pipeline.shape_detector import detect_shapes
 from pipeline.ocr import run_ocr, DEFAULT_LANGUAGE_HINT
 from pipeline.llm_corrector import apply_corrections, label_complex_shapes, TOTAL_LLM_BUDGET_SECONDS
@@ -68,7 +68,16 @@ def process_image(
 
     # Stage 3: Shape detection. Mask the OCR word boxes; without them every glyph
     # cluster comes back as a "complex" shape and gets duplicated into the document.
-    shapes = detect_shapes(preprocessed, text_bboxes_px=[w.bbox_px for w in words])
+    #
+    # Contrast-enhanced here and NOT for the OCR above: the two stages want opposite
+    # things from the same page, and CLAHE used to sit inside preprocess() where both
+    # got it. Measured on test2.jpeg, enhancing loses OCR accuracy (0.9066 -> 0.8955)
+    # but finds 29 shapes instead of 19 — including all five circles, which on that
+    # worksheet hold the coin values. See preprocessor.enhance_contrast. CLAHE does not
+    # resize, so shape coordinates stay in the same space as the word boxes.
+    shapes = detect_shapes(
+        enhance_contrast(preprocessed), text_bboxes_px=[w.bbox_px for w in words],
+    )
 
     # Stage 4: Layout reconstruction (pixel -> relative coords, reading order)
     elements = reconstruct_layout(words, shapes, img_w, img_h)

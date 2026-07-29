@@ -54,7 +54,7 @@ TEXT_HOLE_TOL_PX = 4  # how closely a hole contour must hug a masked text bbox t
 # EdgeDrawing over LSD: measured on class-diagram.png inside the production image,
 # EdgeDrawing returned 330 segments in 33 ms against LSD's 385 in 90 ms, and throws in
 # ellipse detection for free. Research's warning about 122 spurious ellipses came from
-# the raw file; on the *preprocessed* page (denoised, CLAHE'd, text erased) the same
+# the raw file; on the *preprocessed* page (denoised, text erased) the same
 # parameters find 1. LSD stays as the fallback for an environment whose cv2 has no
 # ximgproc — see _detect_segments.
 ED_GRADIENT_THRESHOLD = 36
