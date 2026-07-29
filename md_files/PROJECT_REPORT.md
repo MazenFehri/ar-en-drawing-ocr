@@ -12,19 +12,18 @@ JSON sidecar with coordinates, confidence, and per-stage status.
 
 ## The pipeline
 
-Eight stages, run in order by `pipeline/__init__.py::process_image`.
+Seven stages, run in order by `pipeline/__init__.py::process_image`.
 
 | # | Stage | File | Tech | What it does, and why |
 |---|-------|------|------|----------------------|
 | 1 | Preprocess | `pipeline/preprocessor.py` | OpenCV | Downscale to 2000px longest side, deskew, denoise, CLAHE contrast. The 2000px cap is a measured sweet spot — see *Measurements*. Deskew refuses to rotate past 15°, because a diagonal section line makes detection report ~45° and rotating would wreck the page. |
-| 2 | Layout segmentation | `pipeline/layout.py` | PaddleOCR **PP-Structure** | Classifies page regions as text / figure / table / title. Used to mask text areas before shape detection. |
-| 3 | OCR | `pipeline/ocr.py` | PaddleOCR **PP-OCRv4** | Recognises words with bounding boxes and confidence. Runs *before* shape detection so its word boxes can mask text. |
-| 4 | Shape detection | `pipeline/shape_detector.py` | OpenCV contours | Finds shapes and drawings, classifies them, and crops anything it can't name. |
-| 5 | Layout reconstruction | `pipeline/layout_reconstructor.py` | — | Pixels → relative coordinates, reading order, and word↔shape association. |
-| 6 | LLM correction | `pipeline/llm_corrector.py` | OpenRouter (OpenAI SDK) | Re-reads low-confidence words from cropped images. |
-| 6b | Shape labelling | `pipeline/llm_corrector.py` | Same | Names unclassifiable shapes ("door swing", "north arrow"). |
-| 7 | Word assembly | `pipeline/word_assembler.py` | python-docx + raw DrawingML | Builds the `.docx` with absolutely-positioned elements. |
-| 8 | Sidecar | `pipeline/sidecar.py` | — | JSON describing every element, plus stats and per-stage status. |
+| 2 | OCR | `pipeline/ocr.py` | PaddleOCR 3.7: **PP-OCRv6** det + rec, **PP-OCRv5** Arabic rec | One language-agnostic detection pass, then per-crop recognition. The Latin recogniser runs on every crop; the Arabic one only where Latin confidence is below 0.90 (measured: 2/89 crops on the class diagram, 5/12 on the floor plan). Runs *before* shape detection so its boxes can mask text. |
+| 3 | Shape detection | `pipeline/shape_detector.py` | OpenCV contours + **EdgeDrawing** | Closed outlines and filled blobs go to the contour classifier; everything else goes to a line-segment pass that merges collinear strokes and assembles rectangles. Only genuinely un-nameable ink is cropped to a raster. |
+| 4 | Layout reconstruction | `pipeline/layout_reconstructor.py` | — | Pixels → relative coordinates, reading order, and word↔shape association. No bidi reordering: the Arabic recogniser already returns logical order. |
+| 5 | LLM correction | `pipeline/llm_corrector.py` | OpenRouter (OpenAI SDK) | Re-reads low-confidence words from cropped images. Words it never covers stay highlighted rather than shipping as certain. |
+| 5b | Shape labelling | `pipeline/llm_corrector.py` | Same | Names unclassifiable shapes ("door swing", "north arrow"). |
+| 6 | Word assembly | `pipeline/word_assembler.py` | python-docx + raw DrawingML | Builds the `.docx` with absolutely-positioned elements. |
+| 7 | Sidecar | `pipeline/sidecar.py` | — | JSON describing every element, plus stats and per-stage status. |
 
 ---
 
@@ -35,18 +34,25 @@ Eight stages, run in order by `pipeline/__init__.py::process_image`.
 Everything that isn't text is captured and placed. Recognisable geometry becomes a real
 Word shape; anything else is embedded as a cropped image at its original position.
 
-- **Otsu thresholding** rather than a fixed cutoff — drawings are bimodal (dark ink, light
-  page) and Otsu finds the split itself.
-- **`RETR_CCOMP`, not `RETR_EXTERNAL`.** External-only retrieval discarded everything
-  inside an outer outline — interior walls, doors, furniture. This was the single biggest
-  content-loss bug in the project.
-- **Hole rejection.** A stroke drawn as two parallel lines produces an inner contour that
-  duplicates the outer one. Contours whose bbox nearly matches their parent are dropped.
-- **Classification** by vertex count, extent, circularity and solidity →
-  `circle · ellipse · triangle · rect · square · line · complex`.
-- **Residual ink catch-all.** Whatever is neither text nor a classified contour gets
-  dilated, grouped into connected components, and emitted as cropped images — so hand
-  drawings and odd symbols don't silently vanish.
+Ink is routed by what it actually is, in three passes:
+
+- **Region pass.** Contours with solidity ≥ 0.60 — closed outlines and filled blobs — are
+  classified by vertex count, extent, circularity and solidity →
+  `circle · ellipse · triangle · rect · square`. Otsu thresholding rather than a fixed
+  cutoff, since drawings are bimodal. `RETR_CCOMP` rather than `RETR_EXTERNAL`, which used
+  to discard everything inside an outer outline; hole rejection drops the inner contour of
+  a stroke drawn as two parallel lines.
+- **Stroke pass.** `cv2.ximgproc.createEdgeDrawing` finds line segments, collinear ones are
+  merged, and rectangles are assembled from parallel-pair 4-cycles. This exists because
+  `findContours` traces *region boundaries* and so structurally cannot represent a stroke —
+  a box fused to the connectors touching it becomes one snake-shaped contour with solidity
+  ~0.001 and no rectangle to find. Before this pass the class diagram yielded **zero**
+  rectangles; it now yields 11 of 11. Leftover strokes become open polylines, emitted as
+  real DrawingML freeforms (`a:custGeom`) rather than pictures.
+- **Residual catch-all.** Whatever is left gets dilated, grouped into connected components,
+  and emitted as cropped images — so hand drawings and odd symbols don't silently vanish.
+  Raster embedding is reserved for ink that genuinely cannot be named: on the class diagram
+  the split went from 54 rasters / 6 vectors to 15 / 74.
 
 ### Text is never duplicated into a shape
 
@@ -76,8 +82,12 @@ a filled box came back as a phantom rectangle.
 
 ### Arabic and bidirectional text
 
-- `utils/bidi.py` converts OCR's visual order to logical order — PaddleOCR reports Arabic
-  in the order glyphs sit on the page, which is reversed from how the string is stored.
+- **No bidi reordering.** `arabic_PP-OCRv5_mobile_rec` returns logical (Unicode storage)
+  order already, and as whole phrases. PP-OCRv4 did not — it emitted visual order, and
+  `utils.bidi.to_logical_order` reversed it to compensate. That function is deleted:
+  applying it now would be a second correction, silently shipping reversed Arabic in every
+  document. The failure mode is invisible — reversed Arabic still renders as Arabic and
+  still passes `is_arabic()` — so it is pinned by a codepoint-level test, not a visual one.
 - Word paragraphs get `<w:bidi/>`; Arabic lines are sorted right-to-left in reading order.
 - Language per element is detected by character ratio (`arabic` / `english` / `mixed`).
 
@@ -118,7 +128,7 @@ larger model.
 | Guard | File | Protects against |
 |---|---|---|
 | `asyncio.Semaphore(1)` + threadpool offload | `app/main.py` | One upload freezing the service; PaddleOCR predictors are not thread-safe |
-| WebP magic-byte rejection | `app/main.py` | CVE-2023-4863 in the pinned opencv's libwebp |
+| WebP magic-byte rejection | `app/main.py` | CVE-2023-4863 — fixed upstream in opencv 4.8.1.78, so now defence-in-depth rather than the mitigation |
 | 200 MP decoded-pixel cap | `app/main.py` | Decompression bombs — the 25 MB cap bounds the *encoded* file only |
 | Generic 500 + server-side logging | `app/main.py` | Tracebacks leaking to callers |
 | DB failure tolerated at startup | `app/main.py` | Postgres is only needed by `/feedback`, never by OCR |
@@ -159,9 +169,8 @@ with stats in the `X-Sidecar-Stats` header.
 | Layer | Choice | Why |
 |---|---|---|
 | API | FastAPI + Uvicorn | Async, typed, generates the Swagger UI used for manual testing |
-| OCR | PaddleOCR 2.7.3 (PP-OCRv4) | One of the few engines with real Arabic support that runs on CPU |
-| Layout | PP-Structure | Ships with PaddleOCR; no extra dependency |
-| Vision / CV | OpenCV 4.6.0.66 | Pinned — paddleocr 2.7.3 requires `<=4.6.0.66` |
+| OCR | PaddleOCR 3.7.0 (PP-OCRv6 + PP-OCRv5 Arabic) | One of the few engines with real Arabic support that runs on CPU. v6 has no Arabic, so Arabic stays on the v5 recogniser — per-script routing is still mandatory upstream in 2026. |
+| Vision / CV | OpenCV 4.10.0.84 (contrib) | Set by paddlex, and the only opencv installed. contrib is required for `cv2.ximgproc` (shape detection). |
 | Document | python-docx + hand-written DrawingML | python-docx cannot do floating anchors; the XML is written directly |
 | LLM | OpenRouter via the OpenAI SDK | One API across many models, with a free tier |
 | Database | PostgreSQL 15 + asyncpg | Correction feedback only |
@@ -170,12 +179,20 @@ with stats in the `X-Sidecar-Stats` header.
 
 ### Known constraints
 
-- **The opencv pin is load-bearing.** paddleocr 2.7.3 requires `opencv-python<=4.6.0.66`,
-  which bundles a libwebp with CVE-2023-4863. WebP uploads are refused at the byte level as
-  the mitigation. PaddleOCR 3.x would free this — at the cost of an API rewrite
-  (`.ocr()`→`.predict()`, changed return shape, `PPStructure` removed).
-- **`import paddle` is flaky** — aborts in short-lived processes on some hosts. A known
-  open upstream issue, not fixed by migrating. The long-running server is unaffected.
+- **`enable_mkldnn=False` is load-bearing.** Stock paddle 3.3.1 dies on a CPU without
+  AVX-512 with a PIR/oneDNN `NotImplementedError`. Neither `ir_optim=False` nor
+  `FLAGS_enable_pir_api=0` fixes it, and the `FLAGS_use_mkldnn=0` env var is silently
+  ignored by paddle 3.x — the setting must be a constructor kwarg. It is passed at the
+  single predictor construction site so it cannot be missed.
+- **The WebP guard is no longer load-bearing, but stays.** opencv 4.10.0.84 postdates the
+  CVE-2023-4863 fix (4.8.1.78), so byte-level WebP rejection is now defence-in-depth
+  rather than the mitigation it was under the old 4.6.0.66 pin.
+- **Handwritten Arabic is out of scope for automatic transcription.** Nothing
+  CPU-deployable handles it as of 2026; the systems that do are GPU or hosted API. Those
+  regions come back low-confidence and highlighted for review rather than guessed at.
+- **Correction quality is capped by the free LLM tier.** Rate limits are a daily quota,
+  and the free models return high certainty on wrong answers. Low-confidence words are
+  highlighted whether or not the model answers, so nothing ships silently unverified.
 
 ---
 
@@ -186,18 +203,16 @@ app/
   main.py                     FastAPI app, endpoints, input validation, hardening
   config.py                   pydantic-settings; all tunables live here
 pipeline/
-  __init__.py                 process_image() — orchestrates all 8 stages
+  __init__.py                 process_image() — orchestrates all 7 stages
   preprocessor.py             downscale, deskew, denoise, contrast, quality score
-  layout.py                   PP-Structure region segmentation
-  ocr.py                      PaddleOCR wrapper, per-language model cache
-  shape_detector.py           contour analysis, classification, residual ink
+  ocr.py                      one detection pass + per-crop script routing
+  shape_detector.py           contour + EdgeDrawing segment analysis, residual ink
   layout_reconstructor.py     reading order, relative coords, word↔shape association
   llm_corrector.py            word correction + shape labelling, budgets, fallback
   word_assembler.py           .docx generation via DrawingML
   sidecar.py                  JSON output
-  _paddle_patch.py            disables Paddle IR optimisation (AVX-512 SIGILL workaround)
 models/
-  elements.py                 TextElement / SimpleShapeElement / ComplexShapeElement
+  elements.py                 Text / SimpleShape / PolylineShape / ComplexShape elements
 db/
   connection.py               asyncpg pool
   corrections.py              correction_events table
