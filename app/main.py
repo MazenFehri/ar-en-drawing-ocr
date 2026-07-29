@@ -30,9 +30,9 @@ def _restore_log_level():
 
     Confirmed live (traced logging.Logger.setLevel calls in the running container,
     since a bare `import paddle` reliably SIGABRTs/SIGSEGVs in a throwaway process
-    on this box): loading a model via pipeline/ocr.py imports pipeline/_paddle_patch.py, which does
-    `import paddle.inference`, which transitively imports paddle.distributed
-    submodules. Two of those (paddle/distributed/utils/launch_utils.py and
+    on this box): loading a model via pipeline/ocr.py imports paddle, which transitively
+    imports paddle.distributed submodules. Two of those
+    (paddle/distributed/utils/launch_utils.py and
     paddle/distributed/fleet/meta_parallel/sharding/group_sharded_stage2.py) call
     a paddle-internal `get_logger(level, name="root")` helper at module import
     time. `name="root"` is the special string logging.getLogger() resolves to the
@@ -81,7 +81,7 @@ app = FastAPI(title="Arabic Architectural OCR API", version="1.0.0", lifespan=li
 # image is processing (proven: see scratchpad proof — /health took 2.72s to
 # answer during a 3.02s /process call before this fix).
 #
-# PaddleOCR instances are cached per-language in pipeline.ocr._ocr_instances
+# Predictors are cached per model name in pipeline.ocr._predictors
 # and reused across calls; Paddle Inference predictors are documented as not
 # thread-safe for concurrent inference on one shared instance. Offloading to
 # the threadpool alone would let concurrent /process requests hit the same
@@ -98,7 +98,7 @@ _process_semaphore = asyncio.Semaphore(1)
 @app.get("/health")
 async def health():
     import pipeline.ocr as _ocr
-    return {"status": "ok", "models_loaded": bool(_ocr._ocr_instances)}
+    return {"status": "ok", "models_loaded": bool(_ocr._predictors)}
 
 
 _ALLOWED_CONTENT_TYPES = {
@@ -108,17 +108,24 @@ _MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 def _is_webp(raw: bytes) -> bool:
-    """WebP is refused because opencv is pinned to 4.6.0.66, which bundles a libwebp
-    carrying CVE-2023-4863 (heap overflow, exploited in the wild). The pin still can't
-    move after the switch to the contrib build: paddleocr 2.7.3 requires BOTH
-    opencv-python<=4.6.0.66 and opencv-contrib-python<=4.6.0.66, and pip resolution
-    against opencv 4.10.0.84 was re-verified as ResolutionImpossible. Nothing about
-    adding cv2.ximgproc for shape detection changed the vulnerable decoder underneath.
+    """WebP uploads are refused. This is now belt-and-braces, not a live mitigation.
 
-    Sniffing the bytes rather than trusting content_type is the whole point —
-    cv2.imdecode detects format from content, so a crafted WebP sent as image/png
-    would still reach the vulnerable decoder.
-    ponytail: drop this once paddleocr 3.x frees the opencv pin.
+    It was originally load-bearing: paddleocr 2.7.3 capped opencv at <=4.6.0.66, which
+    bundles a libwebp carrying CVE-2023-4863 (heap overflow, exploited in the wild), and
+    the cap could not move while paddleocr was pinned. Under paddleocr 3.7.0 the only
+    opencv in the graph is opencv-contrib-python 4.10.0.84 (verified in the built image,
+    not inferred from the dependency graph), and the libwebp fix landed upstream in
+    4.8.1.78 — so the vulnerable decoder is gone.
+
+    The guard stays anyway. WebP is not a format architectural drawings arrive in, so
+    refusing it costs nothing, and image-decoder CVEs are a recurring genre rather than a
+    one-off: keeping the format out of cv2.imdecode entirely is cheaper than tracking the
+    next one. Sniffing the bytes rather than trusting content_type is still the whole
+    point — cv2.imdecode detects format from content, so a crafted WebP sent as image/png
+    would otherwise reach the decoder regardless of what the request claimed.
+    ponytail: a denylist of one format, which only helps for the format we thought of.
+    Upgrade path if decoder exposure ever matters more than it does here: allowlist by
+    sniffed magic bytes (PNG/JPEG/TIFF/BMP) instead of denying WebP specifically.
     """
     return len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
 

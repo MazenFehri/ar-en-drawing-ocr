@@ -1,197 +1,346 @@
 import numpy as np
 import pytest
-from unittest.mock import patch, MagicMock
-from pipeline.ocr import run_ocr, OcrWord, _LANG_MODELS, _merge_by_script, _overlap
+from unittest.mock import patch
 
-MOCK_PADDLE_RESULT = [[
-    [[[10, 20], [110, 20], [110, 45], [10, 45]], ("غرفة النوم", 0.92)],
-    [[[120, 20], [200, 20], [200, 45], [120, 45]], ("3.5m", 0.88)],
-    [[[10, 60], [150, 60], [150, 85], [10, 85]], ("entrnce", 0.48)],
-]]
+from pipeline.ocr import (
+    ARABIC_REC_MODEL,
+    ARABIC_ROUTING_CONFIDENCE,
+    DET_MODEL,
+    LATIN_REC_MODEL,
+    OcrWord,
+    _CROP_PAD_PX,
+    _LANG_RECOGNISERS,
+    _crop_polygon,
+    _pick,
+    _poly_bbox,
+    run_ocr,
+)
 
-@patch("pipeline.ocr._get_ocr")
-def test_run_ocr_returns_ocrword_list(mock_get_ocr):
-    mock_ocr = MagicMock()
-    mock_ocr.ocr.return_value = MOCK_PADDLE_RESULT
-    mock_get_ocr.return_value = mock_ocr
-    words = run_ocr(np.ones((200, 300, 3), dtype=np.uint8) * 255)
+# Crops carry a _CROP_PAD_PX margin on all four sides, so a WxH detection yields a
+# (W + 2*pad) x (H + 2*pad) crop. Written in terms of the constant rather than baked in,
+# so retuning the padding doesn't silently invalidate the geometry these tests pin.
+_PAD2 = 2 * _CROP_PAD_PX
+
+# 3.x hands back result objects, not 2.x's [[[pts, (text, conf)]]] nesting: the detector
+# reports every polygon on the page in one `dt_polys`, and the recogniser reports one
+# `rec_text`/`rec_score` per crop it was given. They are dict-like, so dicts stand in.
+
+
+def _quad(x, y, w, h):
+    return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+
+
+class _FakeDetector:
+    def __init__(self, polys):
+        self.polys = polys
+
+    def predict(self, image):
+        return [{"dt_polys": [np.array(p, dtype=np.float32) for p in self.polys]}]
+
+
+class _FakeRecogniser:
+    """Answers with `readings` in order, and records the size of every batch it saw."""
+
+    def __init__(self, readings):
+        self.readings = list(readings)
+        self.batch_sizes = []
+
+    def predict(self, crops):
+        crops = list(crops)
+        self.batch_sizes.append(len(crops))
+        out = []
+        for _ in crops:
+            if not self.readings:
+                break
+            text, score = self.readings.pop(0)
+            out.append({"rec_text": text, "rec_score": score})
+        return out
+
+
+def _wire(polys, latin=(), arabic=()):
+    """Patch _get_predictor and return (fakes_by_model, models_requested, getter)."""
+    fakes = {
+        DET_MODEL: _FakeDetector(polys),
+        LATIN_REC_MODEL: _FakeRecogniser(latin),
+        ARABIC_REC_MODEL: _FakeRecogniser(arabic),
+    }
+    requested = []
+
+    def get_predictor(model_name):
+        requested.append(model_name)
+        return fakes[model_name]
+
+    return fakes, requested, get_predictor
+
+
+IMAGE = np.ones((200, 300, 3), dtype=np.uint8) * 255
+
+POLYS = [
+    _quad(10, 20, 100, 25),
+    _quad(120, 20, 80, 25),
+    _quad(10, 60, 140, 25),
+]
+
+
+def test_run_ocr_returns_ocrword_list():
+    _, _, get = _wire(
+        POLYS,
+        latin=[("iic ii", 0.31), ("3.5m", 0.88), ("entrnce", 0.48)],
+        arabic=[("غرفة النوم", 0.92), ("3.Sm", 0.71), ("ecnrtne", 0.90)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(IMAGE)
     assert len(words) == 3
     assert all(isinstance(w, OcrWord) for w in words)
 
-@patch("pipeline.ocr._get_ocr")
-def test_ocrword_fields(mock_get_ocr):
-    mock_ocr = MagicMock()
-    mock_ocr.ocr.return_value = MOCK_PADDLE_RESULT
-    mock_get_ocr.return_value = mock_ocr
-    words = run_ocr(np.ones((200, 300, 3), dtype=np.uint8) * 255)
+
+def test_ocrword_fields():
+    _, _, get = _wire(
+        POLYS,
+        latin=[("iic ii", 0.31), ("3.5m", 0.88), ("entrnce", 0.48)],
+        arabic=[("غرفة النوم", 0.92), ("3.Sm", 0.71), ("ecnrtne", 0.90)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(IMAGE)
     assert words[0].text == "غرفة النوم"
     assert words[0].confidence == pytest.approx(0.92)
     assert words[0].bbox_px["x"] == 10
     assert words[0].bbox_px["w"] == 100
 
-@patch("pipeline.ocr._get_ocr")
-def test_low_confidence_flagged(mock_get_ocr):
-    mock_ocr = MagicMock()
-    mock_ocr.ocr.return_value = MOCK_PADDLE_RESULT
-    mock_get_ocr.return_value = mock_ocr
-    words = run_ocr(np.ones((200, 300, 3), dtype=np.uint8) * 255, confidence_threshold=0.75)
+
+def test_low_confidence_flagged():
+    # "entrnce" is the Latin reading kept (the Arabic model returned Latin there, so it
+    # loses), and 0.48 is under the caller's threshold.
+    _, _, get = _wire(
+        POLYS,
+        latin=[("iic ii", 0.31), ("3.5m", 0.88), ("entrnce", 0.48)],
+        arabic=[("غرفة النوم", 0.92), ("3.Sm", 0.71), ("ecnrtne", 0.90)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(IMAGE, confidence_threshold=0.75)
     flagged = [w for w in words if w.flagged]
     assert len(flagged) == 1
     assert flagged[0].text == "entrnce"
 
-@patch("pipeline.ocr._get_ocr")
-def test_empty_result(mock_get_ocr):
-    mock_ocr = MagicMock()
-    mock_ocr.ocr.return_value = [[]]
-    mock_get_ocr.return_value = mock_ocr
-    words = run_ocr(np.ones((200, 300, 3), dtype=np.uint8) * 255)
-    assert words == []
 
-def test_en_hint_maps_to_english_model_not_arabic():
-    # Regression guard for the language_hint=en 500 (root cause was a missing
-    # runtime download of a model that only "en" needs, not a mapping bug —
-    # but the tempting quick "fix" is to silently route "en" through the
-    # already-working arabic model, which would mask the bug rather than fix
-    # it). Only "en" should resolve to the dedicated english model.
-    assert _LANG_MODELS["en"] == ("en",)
-    assert _LANG_MODELS["ar"] == ("arabic",)
+def test_empty_result():
+    _, _, get = _wire([], latin=[], arabic=[])
+    with patch("pipeline.ocr._get_predictor", get):
+        assert run_ocr(IMAGE) == []
 
 
-def test_mixed_hint_runs_both_models_single_script_hints_run_one():
-    # The arabic model alone mangles Latin (reverses tokens, fragments
-    # identifiers) while reporting high confidence, so "ar+en" must run both.
-    # "ar"/"en" stay single-model — no second model's worth of latency.
-    assert _LANG_MODELS["ar+en"] == ("en", "arabic")
-    assert len(_LANG_MODELS["ar"]) == 1
-    assert len(_LANG_MODELS["en"]) == 1
+def test_arabic_survives_the_round_trip():
+    # The whole point of the second recogniser: the Latin model cannot emit Arabic
+    # script, so without routing this label would come out as its "iic ii" garbage.
+    _, _, get = _wire(
+        [_quad(10, 20, 100, 25)],
+        latin=[("iic ii", 0.31)],
+        arabic=[("غرفة النوم", 0.92)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(IMAGE)
+    assert [w.text for w in words] == ["غرفة النوم"]
 
 
-# ---------------------------------------------------------------- merge logic
+# ------------------------------------------------------------------ model routing
 
-def _word(text, x, y, w=100, h=25, conf=0.9):
-    return OcrWord(text=text, confidence=conf, bbox_px={"x": x, "y": y, "w": w, "h": h})
-
-
-def test_merge_picks_arabic_model_for_arabic_and_en_model_for_latin():
-    # Same two regions seen by both models. The arabic label must come from the
-    # arabic model; the Latin identifier must come from the en model, whose
-    # reading is the correct one ("+created_at", not the reversed "at_+created").
-    arabic_model = [_word("غرفة النوم", 10, 20), _word("at_+created", 10, 200)]
-    en_model = [_word("iic ii", 10, 20), _word("+created_at", 10, 200)]
-
-    merged = _merge_by_script(arabic_model, en_model)
-
-    by_y = {w.bbox_px["y"]: w.text for w in merged}
-    assert by_y[20] == "غرفة النوم"
-    assert by_y[200] == "+created_at"
-    assert len(merged) == 2
+def test_en_hint_maps_to_latin_model_not_arabic():
+    # Regression guard for the language_hint=en 500 (root cause was a missing runtime
+    # download of a model that only "en" needs, not a mapping bug — but the tempting
+    # quick "fix" is to silently route "en" through the already-working arabic model,
+    # which would mask the bug rather than fix it). It would also be actively wrong:
+    # the arabic recogniser reverses and fragments Latin tokens.
+    assert _LANG_RECOGNISERS["en"] == (LATIN_REC_MODEL,)
+    assert _LANG_RECOGNISERS["ar"] == (ARABIC_REC_MODEL,)
+    assert ARABIC_REC_MODEL not in _LANG_RECOGNISERS["en"]
 
 
-def test_merge_keeps_regions_only_one_model_found():
-    arabic_model = [_word("مدخل رئيسي", 10, 20)]
-    en_model = [_word("MAIN ENTRANCE", 10, 400)]
-
-    merged = _merge_by_script(arabic_model, en_model)
-
-    assert sorted(w.text for w in merged) == sorted(["مدخل رئيسي", "MAIN ENTRANCE"])
+def test_mixed_hint_considers_both_single_script_hints_one():
+    assert _LANG_RECOGNISERS["ar+en"] == (LATIN_REC_MODEL, ARABIC_REC_MODEL)
+    assert len(_LANG_RECOGNISERS["ar"]) == 1
+    assert len(_LANG_RECOGNISERS["en"]) == 1
 
 
-def test_merge_treats_barely_overlapping_boxes_as_separate_regions():
-    # 10px of overlap on a 100px box is two neighbouring labels, not one region.
-    arabic_model = [_word("KITCHEN", 0, 0, w=100, h=25)]
-    en_model = [_word("BEDROOM", 90, 0, w=100, h=25)]
+def test_single_script_hints_never_build_the_other_recogniser():
+    for hint, wanted, unwanted in (
+        ("en", LATIN_REC_MODEL, ARABIC_REC_MODEL),
+        ("ar", ARABIC_REC_MODEL, LATIN_REC_MODEL),
+    ):
+        _, requested, get = _wire(
+            POLYS,
+            latin=[("a", 0.1), ("b", 0.1), ("c", 0.1)],
+            arabic=[("a", 0.1), ("b", 0.1), ("c", 0.1)],
+        )
+        with patch("pipeline.ocr._get_predictor", get):
+            run_ocr(IMAGE, language_hint=hint)
+        # Deliberately low confidences: even so, a single-script hint must skip the
+        # routing entirely rather than fall through to the other model.
+        assert requested == [DET_MODEL, wanted], hint
+        assert unwanted not in requested, hint
 
-    merged = _merge_by_script(arabic_model, en_model)
 
-    assert len(merged) == 2
+def test_detection_runs_once_for_the_mixed_hint():
+    # The reason _merge_by_script/_overlap/the union-find are gone: there is one
+    # segmentation now, so there is nothing left to reconcile.
+    _, requested, get = _wire(
+        POLYS,
+        latin=[("iic ii", 0.31), ("3.5m", 0.98), ("KITCHEN", 0.99)],
+        arabic=[("غرفة النوم", 0.92)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        run_ocr(IMAGE, language_hint="ar+en")
+    assert requested.count(DET_MODEL) == 1
 
 
-def test_merge_resolves_one_line_box_against_several_word_boxes():
-    # Measured on sample_drawing.png: the en model returns a whole line as one
-    # box while the arabic model splits it into words. Plain IoU never reaches
-    # 0.5 on those pairs (0.24-0.47), which used to leave BOTH readings in the
-    # output as overlapping duplicate text. The line and its words are one
-    # region and must resolve to a single model.
-    arabic_model = [
-        _word("GROUND", 704, 65, w=145, h=28),
-        _word("FLOOR", 862, 62, w=118, h=28),
-        _word("PLAN", 985, 63, w=91, h=30),
+def test_only_low_confidence_crops_reach_the_arabic_recogniser():
+    # The cost argument for the design. Two of three crops read confidently as Latin, so
+    # the Arabic recogniser is handed exactly the one that did not — not the whole page.
+    fakes, _, get = _wire(
+        POLYS,
+        latin=[("iic ii", 0.31), ("3.5m", 0.98), ("KITCHEN", 0.99)],
+        arabic=[("غرفة النوم", 0.92)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(IMAGE)
+    assert fakes[LATIN_REC_MODEL].batch_sizes == [3]
+    assert fakes[ARABIC_REC_MODEL].batch_sizes == [1]
+    assert sorted(w.text for w in words) == sorted(["غرفة النوم", "3.5m", "KITCHEN"])
+
+
+def test_arabic_recogniser_is_skipped_entirely_when_nothing_is_doubted():
+    fakes, requested, get = _wire(
+        POLYS,
+        latin=[("LIVING ROOM", 0.98), ("3.5m", 0.98), ("KITCHEN", 0.99)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        run_ocr(IMAGE)
+    assert fakes[ARABIC_REC_MODEL].batch_sizes == []
+    assert ARABIC_REC_MODEL not in requested
+
+
+def test_routing_threshold_is_exclusive_at_the_boundary():
+    # Exactly at the threshold is "confident enough"; below it is not.
+    fakes, _, get = _wire(
+        [_quad(10, 20, 100, 25), _quad(10, 60, 100, 25)],
+        latin=[("AT", ARABIC_ROUTING_CONFIDENCE),
+               ("UNDER", ARABIC_ROUTING_CONFIDENCE - 0.001)],
+        arabic=[("الصالة", 0.95)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(IMAGE)
+    assert fakes[ARABIC_REC_MODEL].batch_sizes == [1]
+    assert sorted(w.text for w in words) == sorted(["AT", "الصالة"])
+
+
+# ---------------------------------------------------------------- per-crop choice
+
+def test_pick_takes_arabic_only_when_it_actually_returned_arabic():
+    assert _pick(("iic ii", 0.31), ("غرفة النوم", 0.92)) == ("غرفة النوم", 0.92)
+
+
+def test_pick_keeps_latin_even_when_arabic_is_more_confident():
+    # The arabic model's RTL decoder mangles Latin ("+created_at" -> "at_+created") while
+    # reporting ~0.92, so its confidence must not win a numeric contest against a genuine
+    # Latin reading. This is the guard that stops the old v4 failure sneaking back in
+    # through the routing path.
+    assert _pick(("+created_at", 0.62), ("at_+created", 0.92)) == ("+created_at", 0.62)
+    assert _pick(("transaction_id", 0.55), ("id_transaction", 0.99))[0] == "transaction_id"
+
+
+def test_pick_keeps_latin_when_arabic_returns_nothing():
+    assert _pick(("entrnce", 0.48), ("", 0.0)) == ("entrnce", 0.48)
+
+
+def test_empty_readings_are_dropped_not_emitted_as_blank_words():
+    _, _, get = _wire(
+        [_quad(10, 20, 100, 25), _quad(10, 60, 100, 25)],
+        latin=[("", 0.0), ("KITCHEN", 0.99)],
+        arabic=[("", 0.0)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(IMAGE)
+    assert [w.text for w in words] == ["KITCHEN"]
+
+
+def test_short_recogniser_batch_does_not_misalign_later_words():
+    # A recogniser yielding fewer results than crops must not shift every subsequent
+    # reading onto the wrong polygon — that would be a silent, page-wide corruption.
+    _, _, get = _wire(POLYS, latin=[("FIRST", 0.99)])  # one reading for three crops
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(IMAGE)
+    assert [w.text for w in words] == ["FIRST"]
+    assert words[0].bbox_px == {"x": 10, "y": 20, "w": 100, "h": 25}
+
+
+def test_words_come_back_in_page_order():
+    _, _, get = _wire(
+        [_quad(10, 300, 60, 20), _quad(200, 10, 60, 20), _quad(10, 10, 60, 20)],
+        latin=[("LAST", 0.99), ("MIDDLE", 0.99), ("FIRST", 0.99)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(np.ones((400, 300, 3), dtype=np.uint8) * 255)
+    assert [w.text for w in words] == ["FIRST", "MIDDLE", "LAST"]
+
+
+# -------------------------------------------------------------------- geometry
+
+def test_poly_bbox_is_the_axis_aligned_hull_of_the_polygon():
+    poly = np.array([[10, 20], [110, 24], [110, 49], [10, 45]], dtype=np.float32)
+    assert _poly_bbox(poly) == {"x": 10, "y": 20, "w": 100, "h": 29}
+
+
+def test_crop_of_an_axis_aligned_quad_has_the_quads_dimensions():
+    crop = _crop_polygon(IMAGE, np.array(_quad(10, 20, 120, 30), dtype=np.float32))
+    assert (crop.shape[1], crop.shape[0]) == (120 + _PAD2, 30 + _PAD2)
+
+
+def test_crop_of_a_tilted_quad_is_unrotated_not_bbox_cropped():
+    # A 100x20 line tilted 30 degrees. Its axis-aligned bbox is ~97x77 — taking that
+    # would hand the recogniser a near-square containing the text running diagonally
+    # across it plus two wedges of whatever is beside it. The perspective transform must
+    # give back the strip's own 100x20 instead.
+    import math
+    cx, cy, half_w, half_h, ang = 150.0, 100.0, 50.0, 10.0, math.radians(30)
+    cos, sin = math.cos(ang), math.sin(ang)
+    corners = [
+        [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos]
+        for dx, dy in ((-half_w, -half_h), (half_w, -half_h), (half_w, half_h), (-half_w, half_h))
     ]
-    en_model = [_word("GROUND FLOOR PLAN", 704, 63, w=370, h=29)]
+    poly = np.array(corners, dtype=np.float32)
 
-    merged = _merge_by_script(arabic_model, en_model)
+    # 100*cos30 + 20*sin30 = 96.6 wide, 100*sin30 + 20*cos30 = 67.3 tall: the
+    # axis-aligned bbox really is nearly square, and 3.4x the strip's own height.
+    bbox = _poly_bbox(poly)
+    assert (bbox["w"], bbox["h"]) == (98, 68)
 
-    assert [w.text for w in merged] == ["GROUND FLOOR PLAN"]
-
-
-def test_merge_resolves_arabic_line_to_the_arabic_models_word_boxes():
-    # Same geometry, Arabic content: the en model's single-box reading of the
-    # Arabic title is garbage ('ojY1 gLjI bbu', measured) and must not survive.
-    arabic_model = [
-        _word("الأرضي", 93, 56, w=104, h=48),
-        _word("الطابق", 197, 56, w=78, h=45),
-        _word("مخطط", 274, 58, w=81, h=34),
-    ]
-    en_model = [_word("ojY1 gLjI bbu", 124, 56, w=226, h=39, conf=0.53)]
-
-    merged = _merge_by_script(arabic_model, en_model)
-
-    assert [w.text for w in merged] == ["الأرضي", "الطابق", "مخطط"]
+    crop = _crop_polygon(np.ones((300, 300, 3), dtype=np.uint8) * 255, poly)
+    assert crop.shape[1] == pytest.approx(100 + _PAD2, abs=2)
+    assert crop.shape[0] == pytest.approx(20 + _PAD2, abs=2)
+    assert crop.shape[0] < bbox["h"] / 2  # nothing like the bbox crop
 
 
-def test_merge_keeps_latin_read_by_only_the_arabic_model():
-    # A group with no en member at all must still emit something — the "Latin
-    # regions come from the en model" rule has nothing to fall back on here.
-    arabic_model = [_word("D-04", 10, 10)]
-    en_model = [_word("KITCHEN", 10, 400)]
-
-    merged = _merge_by_script(arabic_model, en_model)
-
-    assert sorted(w.text for w in merged) == ["D-04", "KITCHEN"]
-
-
-def test_merge_carries_flagged_and_confidence_from_the_chosen_model():
-    arabic_model = [OcrWord("entrnce", 0.48, {"x": 0, "y": 0, "w": 100, "h": 25}, flagged=True)]
-    en_model = [OcrWord("ENTRANCE", 0.99, {"x": 0, "y": 0, "w": 100, "h": 25}, flagged=False)]
-
-    merged = _merge_by_script(arabic_model, en_model)
-
-    assert len(merged) == 1
-    assert merged[0].text == "ENTRANCE"
-    assert merged[0].confidence == pytest.approx(0.99)
-    assert merged[0].flagged is False
+def test_vertical_crop_is_stood_upright():
+    # A tall, narrow detection is vertical text; the recogniser only reads horizontal
+    # strips, so the crop must come back wider than it is tall.
+    crop = _crop_polygon(
+        np.ones((300, 300, 3), dtype=np.uint8) * 255,
+        np.array(_quad(20, 20, 25, 150), dtype=np.float32),
+    )
+    assert (crop.shape[1], crop.shape[0]) == (150 + _PAD2, 25 + _PAD2)
 
 
-def test_merge_of_empty_inputs():
-    assert _merge_by_script([], []) == []
-    assert [w.text for w in _merge_by_script([], [_word("ONLY", 0, 0)])] == ["ONLY"]
-    assert [w.text for w in _merge_by_script([_word("ONLY", 0, 0)], [])] == ["ONLY"]
+def test_degenerate_polygons_are_dropped_rather_than_crashing_the_page():
+    assert _crop_polygon(IMAGE, np.array([[10, 10]] * 4, dtype=np.float32)) is None
+    assert _crop_polygon(IMAGE, np.array([[10, 10], [11, 10]], dtype=np.float32)) is None
 
 
-def test_overlap_is_relative_to_the_smaller_box():
-    box = {"x": 0, "y": 0, "w": 10, "h": 10}
-    assert _overlap(box, box) == pytest.approx(1.0)
-    assert _overlap(box, {"x": 20, "y": 0, "w": 10, "h": 10}) == 0.0
-    # Half-overlapping equal boxes: 50 / 100.
-    assert _overlap(box, {"x": 5, "y": 0, "w": 10, "h": 10}) == pytest.approx(0.5)
-    # Fully contained scores 1.0 however much bigger the outer box is — this is
-    # the case IoU gets wrong (it would score 0.1 here).
-    assert _overlap(box, {"x": 0, "y": 0, "w": 100, "h": 10}) == pytest.approx(1.0)
-
-
-@patch("pipeline.ocr._get_ocr")
-def test_mixed_hint_calls_both_models_single_hint_calls_one(mock_get_ocr):
-    mock_ocr = MagicMock()
-    mock_ocr.ocr.return_value = [[]]
-    mock_get_ocr.return_value = mock_ocr
-
-    run_ocr(np.ones((200, 300, 3), dtype=np.uint8) * 255, language_hint="ar+en")
-    assert [c.args[0] for c in mock_get_ocr.call_args_list] == ["en", "arabic"]
-
-    mock_get_ocr.reset_mock()
-    run_ocr(np.ones((200, 300, 3), dtype=np.uint8) * 255, language_hint="ar")
-    assert [c.args[0] for c in mock_get_ocr.call_args_list] == ["arabic"]
-
-    mock_get_ocr.reset_mock()
-    run_ocr(np.ones((200, 300, 3), dtype=np.uint8) * 255, language_hint="en")
-    assert [c.args[0] for c in mock_get_ocr.call_args_list] == ["en"]
+def test_a_dropped_crop_does_not_shift_the_remaining_words():
+    # The degenerate polygon sits first; the readings must still land on the right boxes.
+    _, _, get = _wire(
+        [[[10, 10]] * 4, _quad(10, 60, 100, 25)],
+        latin=[("KITCHEN", 0.99)],
+    )
+    with patch("pipeline.ocr._get_predictor", get):
+        words = run_ocr(IMAGE)
+    assert [w.text for w in words] == ["KITCHEN"]
+    assert words[0].bbox_px == {"x": 10, "y": 60, "w": 100, "h": 25}

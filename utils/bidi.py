@@ -1,10 +1,24 @@
-import re
-
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# Runs of Latin letters/digits (and the punctuation that binds them, e.g. "3.5m")
-_LTR_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.,:/\-]*")
+# There used to be a `to_logical_order()` here, and pipeline/layout_reconstructor.py
+# called it on every recognised word. It reversed Arabic strings, because PP-OCRv4's
+# arabic model emitted text in *visual* order — the order the glyphs sit on the page,
+# left to right — which is the reverse of Unicode storage order, and both the sidecar and
+# Word (which runs its own bidi algorithm over <w:bidi/> paragraphs) expect logical order.
+#
+# arabic_PP-OCRv5_mobile_rec does not do that. It returns whole phrases already in
+# logical order. Verified on sample_drawing.png by codepoint, not by rendering (rendered
+# Arabic looks plausible either way, which is exactly how this bug hides): the model
+# returns U+0645 062E 0637 0637 0020 0627 0644 0637 0627 0628 0642 ... for
+# "مخطط الطابق الأرضي", which is the correct storage order, not its reverse.
+#
+# So the compensation is gone. Applying it now would be a second correction on top of a
+# correct string and would silently ship reversed Arabic in every document — the failure
+# mode being that it still *renders* as Arabic and still round-trips through
+# is_arabic()/detect_language() unchanged, so nothing downstream would complain.
+# If a future recogniser goes back to visual order, restore the reversal here rather than
+# in the caller, and pin it with a codepoint-level test like the one above.
 
 
 def is_arabic(text: str) -> bool:
@@ -30,27 +44,6 @@ def detect_language(text: str) -> str:
     if arabic_ratio < 0.3:
         return "english"
     return "mixed"
-
-
-def to_logical_order(text: str) -> str:
-    """Convert visually-ordered Arabic into logical (storage) order.
-
-    PaddleOCR reports Arabic in the order the glyphs sit on the page, left to right,
-    which is the reverse of how the string is stored in Unicode. Everything
-    downstream — the sidecar handed to the caller, and Word, which applies its own
-    bidi algorithm to <w:bidi/> paragraphs — expects logical order, so a raw OCR
-    string would render backwards in both.
-
-    Reversing the whole string recovers Arabic order; embedded Latin/digit runs were
-    already left-to-right on the page, so they get flipped back.
-
-    ponytail: single-line heuristic, correct for the short labels a drawing contains.
-    Swap in python-bidi's reverse transform if multi-line paragraphs ever show up.
-    """
-    if not is_arabic(text):
-        return text
-    reversed_text = text[::-1]
-    return _LTR_RUN.sub(lambda m: m.group()[::-1], reversed_text)
 
 
 def reshape_for_display(text: str) -> str:

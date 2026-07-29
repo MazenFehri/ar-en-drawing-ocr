@@ -3,7 +3,7 @@ from models.elements import (
 )
 from pipeline.ocr import OcrWord
 from pipeline.shape_detector import ShapeResult
-from utils.bidi import detect_language, is_arabic, to_logical_order
+from utils.bidi import detect_language, is_arabic
 
 
 def reconstruct_layout(
@@ -23,8 +23,11 @@ def reconstruct_layout(
         elements.append(TextElement(
             id=f"text_{i:03d}",
             bbox=bbox,
-            # OCR hands back visual order; the sidecar and Word both want logical.
-            content=to_logical_order(word.text),
+            # No bidi reordering here. arabic_PP-OCRv5_mobile_rec already returns logical
+            # (Unicode storage) order, which is what the sidecar and Word both want — the
+            # visual-order reversal that used to sit on this line was a v4 compensation
+            # and would now corrupt correct text. See the note in utils/bidi.py.
+            content=word.text,
             language=detect_language(word.text),
             confidence=word.confidence,
             container_shape_id=_innermost_container(word.bbox_px, shape_ids_px),

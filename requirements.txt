@@ -1,24 +1,17 @@
 fastapi==0.115.0
 uvicorn[standard]==0.29.0
-paddlepaddle==2.6.2
-paddleocr==2.7.3
-# pipeline/shape_detector.py needs cv2.ximgproc.createEdgeDrawing, which only the
-# contrib build ships, so declare it rather than inheriting it by luck from paddleocr.
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+# No opencv pin here on purpose. paddleocr 3.x pulls in paddlex, which requires
+# `opencv-contrib-python==4.10.0.84` and nothing else opencv-shaped — so exactly one
+# opencv distribution unpacks into site-packages/cv2 and the directory race that the
+# 2.7.3 pins had to arbitrate (opencv-python + opencv-contrib-python + a headless build
+# via pdf2docx, all fighting over the same directory, last-installed wins) no longer
+# exists. The contrib build is the only one present, so cv2.ximgproc is there by
+# construction rather than by forcing an install order; the Dockerfile still asserts it.
 #
-# Both entries are deliberate and must stay pinned to the SAME version. Normally you
-# would keep exactly one opencv distribution, because all of them unpack into the same
-# site-packages/cv2 and the last one installed wins — but paddleocr==2.7.3 hard-requires
-# `opencv-python<=4.6.0.66` AND `opencv-contrib-python<=4.6.0.66`, and its dependency
-# pdf2docx drags in opencv-python-headless on top. Dropping either line here does not
-# uninstall anything, it only makes the version we get implicit. Same version on both =
-# whichever build wins the directory race, the ABI matches; the Dockerfile then forces
-# contrib to be the one that wins, so ximgproc is actually there.
-#
-# That <=4.6.0.66 cap is also why the WebP upload guard in app/main.py stays: 4.6.0.66
-# bundles a libwebp with CVE-2023-4863 and pip refuses to resolve anything newer while
-# paddleocr is pinned (verified: ResolutionImpossible against opencv 4.10.0.84).
-opencv-python==4.6.0.66
-opencv-contrib-python==4.6.0.66
+# 4.10.0.84 also carries a libwebp with CVE-2023-4863 fixed (landed in 4.8.1.78), which
+# is why app/main.py's WebP guard is now defence-in-depth rather than a live mitigation.
 Pillow==12.3.0
 python-docx==1.1.2
 openai==1.35.0
@@ -30,4 +23,9 @@ pydantic-settings==2.2.1
 python-multipart==0.0.31
 httpx==0.27.0
 lxml==6.1.0
-numpy==1.26.4
+# numpy 2.x. paddlepaddle 3.3.1 / paddleocr 3.7.0 are built against it, and 1.26.4 is
+# not resolvable alongside them. The array code in pipeline/preprocessor.py,
+# utils/image_utils.py and pipeline/shape_detector.py uses no removed 1.x aliases
+# (np.float_/np.int0/np.bool8/np.object_ etc.) and was exercised end-to-end on both
+# test drawings under 2.x before this pin landed.
+numpy==2.3.5

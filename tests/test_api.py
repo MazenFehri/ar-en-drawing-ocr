@@ -111,9 +111,11 @@ def test_process_rejects_unknown_response_format():
 
 
 def test_process_rejects_webp_disguised_as_png():
-    """Content-type is attacker-controlled and cv2.imdecode sniffs the bytes, so
-    the magic-byte check is the only thing standing between a crafted WebP and
-    opencv 4.6.0.66's CVE-2023-4863 libwebp decoder."""
+    """Content-type is attacker-controlled and cv2.imdecode sniffs the bytes, so a
+    content_type check alone would let a crafted WebP through to the decoder. Under
+    opencv 4.10.0.84 that decoder no longer carries CVE-2023-4863 (fixed in 4.8.1.78),
+    but the guard is kept as defence-in-depth — see _is_webp in app/main.py — and this
+    test pins the byte-sniffing behaviour that makes it worth keeping."""
     webp = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"VP8 " + b"\x00" * 32
     resp = client.post(
         "/process",

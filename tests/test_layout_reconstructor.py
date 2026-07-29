@@ -23,14 +23,35 @@ def test_to_relative_bbox():
 def test_arabic_line_reads_right_to_left():
     """On one line, "غرفة النوم" has غرفة rightmost — it must come out first.
 
-    Input is what PaddleOCR hands back: visual order. Output is logical order.
+    Input is what the recogniser hands back, which under arabic_PP-OCRv5_mobile_rec is
+    logical (Unicode storage) order. Only the *order of the boxes along the line* is this
+    function's business; the strings themselves pass through untouched.
     """
     words = [
-        make_word("مونلا", 100, 50, 80, 24),   # النوم, left on the page
-        make_word("ةفرغ", 200, 52, 70, 24),    # غرفة,  right on the page
+        make_word("النوم", 100, 50, 80, 24),   # left on the page
+        make_word("غرفة", 200, 52, 70, 24),    # right on the page
     ]
     ordered = reconstruct_layout(words, [], IMG_W, IMG_H)
     assert [el.content for el in ordered] == ["غرفة", "النوم"]
+
+
+def test_arabic_text_is_not_reordered_on_the_way_through():
+    """The double-correction guard, asserted by codepoint.
+
+    Under PP-OCRv4 this layer reversed every Arabic string, because that model emitted
+    visual order. The v5 arabic recogniser emits logical order, so the reversal had to go
+    — and if it ever comes back, the damage is invisible in a rendered diff (reversed
+    Arabic still renders as Arabic, still passes is_arabic and detect_language). Compare
+    codepoints, not glyphs.
+    """
+    phrase = "مخطط الطابق الأرضي"
+    assert [ord(c) for c in phrase][:4] == [0x0645, 0x062E, 0x0637, 0x0637]  # م خ ط ط
+
+    ordered = reconstruct_layout([make_word(phrase, 100, 50, 300, 24)], [], IMG_W, IMG_H)
+
+    assert [ord(c) for c in ordered[0].content] == [ord(c) for c in phrase]
+    assert ordered[0].content != phrase[::-1]
+    assert ordered[0].language == "arabic"
 
 
 def test_english_line_reads_left_to_right():
