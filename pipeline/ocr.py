@@ -99,6 +99,40 @@ ARABIC_ROUTING_CONFIDENCE = 0.90
 # rather than by page size, which would also stop a large page of tiny text falling through.
 OCR_MIN_DIM_PX = 1500
 
+# Detector geometry. Both of these are measured wins over the shipped defaults, scored as
+# mean per-line best match against a hand-transcribed ground truth for two ~45 DPI Arabic
+# worksheets: combined 0.8134 -> 0.9145, with no measurable latency change.
+#
+# unclip_ratio is the dominant one (+0.083 of the +0.101 on its own). DB detectors emit a
+# tight shrunken region and dilate it back out by this factor; the 1.4 default over-grows
+# an already line-tight box on dense prose and pulls the neighbouring rows' ascenders and
+# descenders into the crop, so the recogniser reads a strip with contamination above and
+# below it. Same box, same geometry, tightened to 1.0:
+#     1.4: 'السنلاحتفال بعيد ملاد أمهم قر الإخوة الساهمة بذخاتهم'      conf 0.72
+#     1.0: 'السند للاحتقال بعيد ميلاد أمهم قرر الإخوة المساهمة بمذخراتهم'  conf 0.88
+# Recognised characters rose 469->567 and 407->629 on the two pages. Sweeping it spans
+# 0.708 (at 2.0) to 0.915 (at 1.0), monotonically.
+#
+# limit_side_len is the smaller half (+0.018). PP-OCRv6_tiny_det is in paddlex's
+# _TEXT_DET_MAX_LIMIT_MODELS, so it defaults to (960, "max") and *downscales* anything
+# larger before inference — the OCR_MIN_DIM_PX upscale to 1500 was being cut straight back
+# to 960, netting 1.81x rather than 2.82x. Note the fix is NOT "stop downscaling": accuracy
+# peaks around 1000-1200 detector pixels and falls off above it (1200: 0.9145, 1400:
+# 0.8947, 1500: 0.8914), so the detector genuinely does not want the full upscale. Cubic up
+# to 1500 then linear down to 1200 measured better than feeding it 1200 directly.
+#
+# Measured inert and deliberately not set: box_thresh (0.30/0.40/0.55 give bit-identical
+# accuracy — it only adds or drops low-score polygons carrying no text) and thresh (<0.01
+# either way).
+#
+# ponytail: tuned on two pages of one document type at one resolution. 1200 vs 1000 is a
+# 0.002 difference and is not meaningfully tuned — treat the pair as "tighter unclip, mild
+# size bump", not as precise constants. Upgrade path if a real corpus disagrees: these are
+# per-call constructor arguments, so they could become request parameters or be chosen from
+# the measured median text height rather than fixed here.
+DET_LIMIT_SIDE_LEN = 1200
+DET_UNCLIP_RATIO = 1.0
+
 # A crop this much taller than it is wide is vertical text; rotate it upright before
 # recognition. This is PaddleOCR's own convention from get_rotate_crop_image, kept because
 # the 3-model design has no text-line orientation classifier to do it properly.
@@ -365,6 +399,17 @@ def _get_predictor(model_name: str):
     """
     if model_name not in _predictors:
         from paddleocr import TextDetection, TextRecognition
-        cls = TextDetection if model_name == DET_MODEL else TextRecognition
-        _predictors[model_name] = cls(model_name=model_name, enable_mkldnn=False)
+        if model_name == DET_MODEL:
+            # Geometry kwargs go on the detector only — TextRecognition has no notion of
+            # either, and paddleocr's mixins raise on unexpected keywords rather than
+            # ignoring them, so the single shared `cls(...)` call this replaced could not
+            # carry them.
+            _predictors[model_name] = TextDetection(
+                model_name=model_name, enable_mkldnn=False,
+                limit_side_len=DET_LIMIT_SIDE_LEN, unclip_ratio=DET_UNCLIP_RATIO,
+            )
+        else:
+            _predictors[model_name] = TextRecognition(
+                model_name=model_name, enable_mkldnn=False,
+            )
     return _predictors[model_name]

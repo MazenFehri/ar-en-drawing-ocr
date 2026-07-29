@@ -403,3 +403,33 @@ def test_poly_bbox_divides_by_the_scale_it_was_given():
     poly = np.array(_quad(40, 80, 200, 40), dtype=np.float32)
     assert _poly_bbox(poly, 4.0) == {"x": 10, "y": 20, "w": 50, "h": 10}
     assert _poly_bbox(poly) == _poly_bbox(poly, 1.0)
+
+
+# --- detector geometry (see DET_UNCLIP_RATIO) -------------------------------------------
+
+
+def test_detector_gets_the_tuned_geometry_and_the_recognisers_do_not():
+    """The kwargs are detector-only. paddleocr's recogniser mixin raises on an unexpected
+    keyword rather than ignoring it, so passing them to both — which the single shared
+    cls(...) call here used to force — is a hard crash, not a no-op."""
+    import pipeline.ocr as ocr
+    built = {}
+
+    class _Fake:
+        def __init__(self, **kwargs):
+            built[kwargs["model_name"]] = kwargs
+
+    with patch.dict(ocr._predictors, {}, clear=True), \
+         patch.dict("sys.modules", {"paddleocr": type(
+             "m", (), {"TextDetection": _Fake, "TextRecognition": _Fake})}):
+        ocr._get_predictor(DET_MODEL)
+        ocr._get_predictor(LATIN_REC_MODEL)
+
+    from pipeline.ocr import DET_LIMIT_SIDE_LEN, DET_UNCLIP_RATIO
+    assert built[DET_MODEL]["limit_side_len"] == DET_LIMIT_SIDE_LEN
+    assert built[DET_MODEL]["unclip_ratio"] == DET_UNCLIP_RATIO
+    assert "unclip_ratio" not in built[LATIN_REC_MODEL]
+    assert "limit_side_len" not in built[LATIN_REC_MODEL]
+    # enable_mkldnn=False is a hard requirement on this CPU for every predictor, not tuning.
+    assert built[DET_MODEL]["enable_mkldnn"] is False
+    assert built[LATIN_REC_MODEL]["enable_mkldnn"] is False
