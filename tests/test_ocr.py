@@ -3,6 +3,7 @@ import pytest
 from unittest.mock import patch
 
 from pipeline.ocr import (
+    ARABIC_DIGIT_DONOR_MODEL,
     ARABIC_REC_MODEL,
     ARABIC_ROUTING_CONFIDENCE,
     DET_MODEL,
@@ -14,6 +15,7 @@ from pipeline.ocr import (
     _crop_polygon,
     _pick,
     _poly_bbox,
+    _splice_digits,
     _upscale_for_ocr,
     run_ocr,
 )
@@ -59,12 +61,18 @@ class _FakeRecogniser:
         return out
 
 
-def _wire(polys, latin=(), arabic=()):
-    """Patch _get_predictor and return (fakes_by_model, models_requested, getter)."""
+def _wire(polys, latin=(), arabic=(), donor=()):
+    """Patch _get_predictor and return (fakes_by_model, models_requested, getter).
+
+    `donor` answers for ARABIC_DIGIT_DONOR_MODEL, which run_ocr consults only for crops
+    whose winning reading came back Arabic. It defaults to empty readings, which splice
+    nothing, so tests that are not about digit recovery are unaffected by its existence.
+    """
     fakes = {
         DET_MODEL: _FakeDetector(polys),
         LATIN_REC_MODEL: _FakeRecogniser(latin),
         ARABIC_REC_MODEL: _FakeRecogniser(arabic),
+        ARABIC_DIGIT_DONOR_MODEL: _FakeRecogniser(donor),
     }
     requested = []
 
@@ -433,3 +441,83 @@ def test_detector_gets_the_tuned_geometry_and_the_recognisers_do_not():
     # enable_mkldnn=False is a hard requirement on this CPU for every predictor, not tuning.
     assert built[DET_MODEL]["enable_mkldnn"] is False
     assert built[LATIN_REC_MODEL]["enable_mkldnn"] is False
+
+
+# --- digit recovery (see _recover_dropped_digits) ---------------------------------------
+
+# The three real losses, transcribed from what each recogniser actually returned for the
+# same crop on test1.jpeg: v5 reads the Arabic correctly and deletes the number, v3 keeps
+# the number. Written out rather than paraphrased so a regression is recognisable.
+_REAL_DROPS = [
+    ("فاحضرمجدي  مي وأحضرت رانية مبلغا يقل عن مبلغ",
+     "فاحضر مجدي 27250 مي وأحضرت رانية مبلغا يقل عن مبلغ", "27250"),
+    ("مجدى ب  ميبينما أحضر أحمد ضعف ما أحضرته رانية",
+     "مجدى ب 8500 ميبينما أحضر أحمد ضعف ما أحضرته رانية", "8500"),
+    ("علب عصير ب مي الواحدة", "علب عصير ب 3240 مي الواحدة", "3240"),
+]
+
+
+@pytest.mark.parametrize("primary,donor,number", _REAL_DROPS)
+def test_a_number_the_arabic_model_deleted_is_put_back(primary, donor, number):
+    out = _splice_digits(primary, donor)
+    assert number in out
+    # The donor is a worse Arabic reader; only its digits may cross over. Every Arabic
+    # word primary had must survive.
+    for word in primary.split():
+        assert word in out
+
+
+def test_an_inserted_number_does_not_fuse_onto_the_next_word():
+    out = _splice_digits("علب عصير ب مي الواحدة", "علب عصير ب 3240 مي الواحدة")
+    assert "3240 مي" in out and "3240مي" not in out
+
+
+def test_nothing_is_spliced_when_the_donor_adds_no_digits():
+    assert _splice_digits("فريق الأسود", "فريق الاسود") == "فريق الأسود"
+    assert _splice_digits("فريق الأسود", "") == "فريق الأسود"
+
+
+def test_a_number_primary_already_read_is_not_duplicated():
+    assert _splice_digits("43500 مي", "43500 مي") == "43500 مي"
+    assert _splice_digits("المبلغ 100 دينار", "المبلغ 100 دينار").count("100") == 1
+
+
+def test_digits_are_not_taken_from_a_donor_that_read_a_different_string():
+    """A donor that disagrees about the whole strip has misread the crop; its digits would
+    be a number invented out of nothing, which is worse than the missing one."""
+    assert _splice_digits("فريق الأسود", "99999 xyzzy qwerty") == "فريق الأسود"
+
+
+def test_primary_wins_where_both_read_a_number_differently():
+    """Only *deletions* are repaired. A digit both models saw but read differently is an
+    ordinary misread, and primary wins those as it wins every other character contest."""
+    assert _splice_digits("المبلغ 500 دينار", "المبلغ 800 دينار") == "المبلغ 500 دينار"
+
+
+def test_the_donor_is_only_consulted_for_crops_that_came_back_arabic():
+    """A page with no Arabic must not pay for a second recognition pass."""
+    import pipeline.ocr as ocr
+    crops = [np.ones((20, 60, 3), dtype=np.uint8) for _ in range(3)]
+    called = []
+
+    def fake_recognise(model, batch):
+        called.append((model, len(batch)))
+        return [("١٢٣", 0.9)] * len(batch)
+
+    with patch.object(ocr, "_recognise", fake_recognise):
+        latin_only = [("entrance", 0.97), ("3.5m", 0.98), ("KITCHEN", 0.99)]
+        assert ocr._recover_dropped_digits(latin_only, crops) == latin_only
+        assert called == []
+
+        mixed = [("entrance", 0.97), ("غرفة النوم", 0.92), ("KITCHEN", 0.99)]
+        ocr._recover_dropped_digits(mixed, crops)
+    assert called == [(ocr.ARABIC_DIGIT_DONOR_MODEL, 1)], "only the Arabic crop is re-read"
+
+
+def test_arabic_indic_digits_are_left_alone():
+    """The Arabic recogniser reads ٠-٩ correctly and only drops Western digits, so treating
+    Arabic-Indic ones as recoverable turns the donor's misreads into invented numbers.
+    Measured: it spliced a bogus ٢ into 'ما هوثمن العصير؟'. Python's \d matches them, which
+    is exactly why _DIGIT_RUN spells out [0-9]."""
+    assert _splice_digits("ما هو ثمن العصير؟", "ما هو ثمن العصير؟ ٢") == "ما هو ثمن العصير؟"
+    assert _splice_digits("و د", "و ١ د") == "و د"

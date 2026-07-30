@@ -18,6 +18,8 @@ Measured on this hardware (i7-13650HX, 20 threads, no AVX-512, CPU only), best-o
 the two-pass v4 design. A naive version bump that kept two full passes measured 38.11s /
 12.53s — the win here is the single segmentation, not the model version.
 """
+import difflib
+import re
 from dataclasses import dataclass
 
 import cv2
@@ -35,6 +37,30 @@ DET_MODEL = "PP-OCRv6_tiny_det"
 LATIN_REC_MODEL = "PP-OCRv6_small_rec"
 # Arabic. Only ever consulted for crops the Latin recogniser was unsure about.
 ARABIC_REC_MODEL = "arabic_PP-OCRv5_mobile_rec"
+# Consulted ONLY for the digits it can see and ARABIC_REC_MODEL cannot. See _splice_digits.
+ARABIC_DIGIT_DONOR_MODEL = "arabic_PP-OCRv3_mobile_rec"
+
+# How similar the two Arabic readings of one crop must be before digits are carried across.
+#
+# Two recognisers reading the same strip normally agree closely on the Arabic even when
+# they disagree on a letter or two. When they don't agree at all, one of them has misread
+# the crop wholesale and its digits are not evidence of anything — splicing from it would
+# invent a number that is not on the page, which is far worse than the missing number this
+# whole mechanism exists to fix.
+# ponytail: one ratio over the whole string, so a donor that nails the half of the line
+# containing the number but garbles the other half can still fall under the bar and be
+# ignored. Upgrade path if that shows up in practice: score the similarity of the aligned
+# neighbourhood around each digit run rather than of the entire reading.
+DIGIT_DONOR_MIN_SIMILARITY = 0.5
+
+# A digit run: Western digits plus the separators that appear inside one number.
+#
+# [0-9] and not \d, which is load-bearing. Python's \d matches every Unicode decimal digit
+# including Arabic-Indic ٠-٩, and ARABIC_REC_MODEL reads *those* perfectly well — it only
+# drops Western ones. Matching them made the donor's Arabic-Indic misreads look like
+# recoverable losses, and measured on these pages it spliced a spurious ٢ into
+# "ما هوثمن العصير؟" and a ١ into "و د", costing test2 accuracy (0.8678 -> 0.8623).
+_DIGIT_RUN = re.compile(r"[0-9][0-9.,٫٬]*[0-9]|[0-9]")
 
 # The caller's language_hint mapped to the recognisers to consider, in order.
 #
@@ -201,6 +227,8 @@ def run_ocr(
             for n, arabic_reading in zip(unsure, secondary):
                 readings[n] = _pick(primary[n], arabic_reading)
 
+    readings = _recover_dropped_digits(readings, [crops[i] for i in keep])
+
     words = []
     for n, i in enumerate(keep):
         text, conf = readings[n]
@@ -236,6 +264,75 @@ def _pick(
     if arabic_text and is_arabic(arabic_text):
         return arabic
     return latin
+
+
+def _recover_dropped_digits(
+    readings: list[tuple[str, float]], crops: list[np.ndarray],
+) -> list[tuple[str, float]]:
+    """Put back the numbers ARABIC_REC_MODEL silently deletes from Arabic sentences.
+
+    arabic_PP-OCRv5_mobile_rec drops Western digits embedded mid-line in RTL text, usually
+    leaving a double space where the number was and reading the surrounding Arabic
+    correctly. Measured on two Arabic maths worksheets: `27250`, `8500` and `3240` are all
+    lost this way, while `43500` survives only because it sits on its own line and is
+    therefore its own crop. The digits are inside the detected polygon, so this is a
+    decoder defect, not a detection or image one — it survived all 45 preprocessing
+    variants and all 23 detector configurations tested against it.
+
+    The Latin recogniser cannot help: on these crops it returns an empty string at 0.00,
+    so there is nothing of its to merge. arabic_PP-OCRv3_mobile_rec, the previous
+    generation, *does* emit the digits (3 of 4 numbers against v5's 1 of 4) but is worse at
+    Arabic overall (0.8924 vs 0.9145), so it is not a replacement — it is used here purely
+    as a digit donor, and none of its Arabic text is ever kept.
+
+    Only crops whose chosen reading is Arabic are re-read, so a page with no Arabic pays
+    nothing, and the second pass sees at most the Arabic subset rather than the page.
+    """
+    targets = [
+        n for n, (text, _) in enumerate(readings)
+        if text and is_arabic(text) and n < len(crops)
+    ]
+    if not targets:
+        return readings
+
+    donor = _recognise(ARABIC_DIGIT_DONOR_MODEL, [crops[n] for n in targets])
+    out = list(readings)
+    for n, (donor_text, _) in zip(targets, donor):
+        text, conf = out[n]
+        out[n] = (_splice_digits(text, donor_text), conf)
+    return out
+
+
+def _splice_digits(primary: str, donor: str) -> str:
+    """Return `primary` with digit runs the donor saw and it missed put back in place.
+
+    Only digits cross over, and only at the position the alignment puts them — the donor's
+    own Arabic is always discarded, because it is the weaker reader of everything except
+    these numbers. Returns `primary` unchanged when there is nothing to add, so the common
+    case (no digits on the line, or both readers agree) is a no-op.
+    """
+    missing = [run for run in _DIGIT_RUN.findall(donor) if run not in primary]
+    if not missing:
+        return primary
+    if difflib.SequenceMatcher(None, primary, donor).ratio() < DIGIT_DONOR_MIN_SIMILARITY:
+        # The two disagree about the whole strip, so the donor's digits are not evidence.
+        return primary
+
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, primary, donor).get_opcodes():
+        segment = primary[i1:i2]
+        out.append(segment)
+        if tag in ("insert", "replace"):
+            # Where the donor has digits and `primary` has none, the number was dropped.
+            # A segment where primary *also* has digits is an ordinary misread, not a
+            # deletion, and primary wins those as it wins every other character contest.
+            runs = [r for r in _DIGIT_RUN.findall(donor[j1:j2]) if r in missing]
+            if runs and not _DIGIT_RUN.search(segment):
+                # Padded on both sides, then collapsed below: an inserted run otherwise
+                # fuses onto the neighbouring word ("3240مي") when the gap primary left
+                # behind was a single space rather than the usual double.
+                out.append(f" {' '.join(runs)} ")
+    return " ".join("".join(out).split())
 
 
 def _detect(image: np.ndarray) -> list[np.ndarray]:
