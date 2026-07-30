@@ -10,12 +10,13 @@ __pycache__
 .mypy_cache
 docs
 md_files
+README.md
+LICENSE
 *.jsonl
 tests
 sample_drawing.png
-response.json
-output.docx
-sidecar.json
-class-diagram.png
+samples
+*.docx
+*.sidecar.json
 try_it.py
 .vscode

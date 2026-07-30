@@ -265,7 +265,7 @@ curl -X POST http://localhost:8000/process \
 
 The content type must match the file. WebP is rejected deliberately.
 
-**Script:** `python try_it.py path/to/image.png` writes `output.docx` + `sidecar.json`.
+**Script:** `python try_it.py path/to/image.png` writes `image.docx` + `image.sidecar.json`.
 
 ### 4. Operate
 

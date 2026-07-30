@@ -2,6 +2,21 @@
 
 FastAPI microservice that accepts architectural drawing images (Arabic/English, handwritten or printed) and returns a positioned Word `.docx` document plus a JSON sidecar.
 
+Every word and every shape lands where it sat on the original page. Text boxes are real
+Word text boxes, and recognised geometry is real DrawingML — you can select, move and
+resize a wall or a circle in Word, not just look at a picture of one. Only ink that
+genuinely cannot be named is embedded as a raster, so nothing on the page is dropped.
+
+Built as a server-to-server component for a .NET application. Runs OCR locally: no
+per-page cost, and drawings never leave the machine. The vision LLM is an optional
+reviewer for low-confidence words only — if the provider is down or rate-limited, the
+pipeline still returns the document from raw OCR and says so in the sidecar.
+
+```bash
+docker compose up --build
+python try_it.py sample_drawing.png
+```
+
 ## Endpoints
 
 | Method | Path | Description |
@@ -17,8 +32,12 @@ FastAPI microservice that accepts architectural drawing images (Arabic/English, 
 No local Python or PostgreSQL setup required.
 
 ```bash
+cp .env.example .env      # then put your OpenRouter key in it
 docker compose up --build
 ```
+
+The service runs without a key — LLM correction is optional and its absence is reported
+as `llm_status.state: "not_attempted"`, `reason: "not_configured"`.
 
 The build bakes in the three model weights (~31 MB total). Subsequent starts are fast.
 
@@ -53,7 +72,7 @@ pip install -r requirements.txt
 
 ### 3. Configure environment
 
-The `.env` file in the project root is already populated. If starting fresh, set these variables:
+Copy `.env.example` to `.env` and fill it in:
 
 ```env
 OPENROUTER_API_KEY=your_key_here
@@ -113,16 +132,28 @@ hand; `docx` gives you a file you can open in Word straight from the browser.
 
 ```bash
 python try_it.py your_drawing.jpg      # omit the filename to use sample_drawing.png
+python try_it.py your_drawing.jpg --ar     # Arabic only, skips the Latin reader
+python try_it.py your_drawing.jpg --en     # English only
+python try_it.py your_drawing.jpg --label  # also ask the LLM to name unrecognised shapes
 ```
 
-Writes `output.docx` and `sidecar.json` next to the image and prints every element
-found with its confidence. To watch the LLM reviewer actually run, raise the
-threshold — at the `0.75` default a clean image flags almost nothing:
+Writes `your_drawing.docx` and `your_drawing.sidecar.json` next to the image — named
+after the input, so testing a second image doesn't overwrite the first — and prints
+every element found with its confidence. To watch the LLM reviewer actually run, raise
+the threshold; at the `0.75` default a clean image flags almost nothing:
 
 ```bash
 # in try_it.py, or as a -F field on the curl call below
 confidence_threshold=0.99
 ```
+
+### Scan resolution is the biggest lever on accuracy
+
+`try_it.py` prints a loud warning, and the sidecar sets `low_resolution: true`, when the
+median text line is under 20px tall. Arabic letters are distinguished by dots 1–2px
+across at that size — they are not sampled at all, and the reading is partly guesswork
+however confident the scores look. **Scan at 200–300 DPI.** No OCR model recovers what
+the scan never captured.
 
 ### Process an image (curl)
 
@@ -307,3 +338,13 @@ format from content.
 **Known advisories.** The two `paddlepaddle 2.6.2` command-injection advisories
 (PYSEC-2026-1754/-1756) are resolved by this migration — they were fixed on the 3.x line,
 and the tree is now on `paddlepaddle 3.3.1`.
+
+---
+
+## Further reading
+
+| Document | What's in it |
+|---|---|
+| [`md_files/PROJECT_REPORT.md`](md_files/PROJECT_REPORT.md) | Stage-by-stage design, every measurement behind a tuning constant, and the known limits |
+| [`md_files/research.md`](md_files/research.md) | The prior-art survey the architecture was chosen from — Arabic OCR options, layout analysis, cost analysis |
+| [`docs/superpowers/specs/`](docs/superpowers/specs/) | Original design spec |
