@@ -17,6 +17,48 @@ docker compose up --build
 python try_it.py sample_drawing.png
 ```
 
+---
+
+## What it produces
+
+### A mixed Arabic/English floor plan
+
+Input on the left, the generated `.docx` opened in Word on the right. Nothing was
+hand-corrected — this is one `try_it.py` run.
+
+| Input image | Generated Word document |
+|---|---|
+| ![input](docs/images/floor-plan-input.png) | ![output](docs/images/floor-plan-output.png) |
+
+**82 elements in 5.6s** — 44 text, 37 shapes, 1 raster. Reproduce it with
+`python try_it.py docs/images/floor-plan-input.png`.
+
+Worth noting in the output:
+
+- **The Arabic notes paragraph came through whole**, at 98% and 94%, in logical order —
+  not as reversed fragments.
+- **The area schedule survives as a table**, because each cell border is detected as its
+  own rectangle and positioned independently. The pipeline has no table model; the grid
+  is an emergent result of accurate rectangle placement.
+- **Every shape is a real Word shape.** Click a room, a `WC` circle or the north-arrow
+  triangle in Word and you get resize handles, not a picture.
+- **The freehand revision mark** (right of the plan, labelled `rev.`) is the one thing
+  that couldn't be named. It's embedded as a cropped raster at its original position
+  rather than dropped — that's the designed fallback, working.
+
+Honest about the misses: the dimension **tick marks** on the `14.80 m` line were not
+recovered as line shapes, and two Arabic sentences lost the space at a full stop
+(`التنفيذ. سماكة` → `التنفيذسماكة`). Both are visible in the screenshot above.
+
+### The simpler bundled sample
+
+| Input image | Generated Word document |
+|---|---|
+| ![input](docs/images/sample-input.png) | ![output](docs/images/sample-output.png) |
+
+**19 elements in 5.0s**, all 12 text elements at 92–100% confidence. The irregular
+pentagon has no preset geometry to map to, so it becomes an embedded raster.
+
 ## Endpoints
 
 | Method | Path | Description |
