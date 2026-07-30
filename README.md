@@ -339,48 +339,6 @@ image → preprocess → OCR (one detection pass, per-crop recognition) → shap
   lines and sorts each line in its own direction, right-to-left for Arabic.
 - **Storage:** PostgreSQL via asyncpg for correction feedback
 
-## Troubleshooting
-
-**`NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support ...` at
-`onednn_instruction.cc:116` when a model runs.**
-Stock paddle 3.3.1 is dead on CPUs without AVX-512 (Intel 12th/13th/14th-gen consumer
-parts — Alder Lake / Raptor Lake — have it fused off). The **only** fix that works is
-passing `enable_mkldnn=False` to every `TextDetection` / `TextRecognition` constructor,
-which `pipeline/ocr.py` does. Verified not to help: `ir_optim=False`, the
-`FLAGS_enable_pir_api=0` env var, and the `FLAGS_use_mkldnn=0` env var (silently ignored
-by paddle 3.x, which is why it is no longer set in the Dockerfile). Miss one constructor
-and it is an immediate hard crash, not a slow path.
-
-The older `SIGILL` / `Illegal instruction` crash on this hardware was a paddle 2.6.x
-problem (Paddle#76111) handled by a `pipeline/_paddle_patch.py` monkeypatch. It does not
-reproduce on 3.3.1, and that module is deleted.
-
-**First request is slow (~6s), later ones are faster.**
-Model weights (~31 MB for the three models) are baked into the image and cached in the
-`paddlex_models` Docker volume at `~/.paddlex/official_models`, so they are not
-re-downloaded. The first request still pays predictor construction. Note the cache path
-moved from 2.x's `~/.paddleocr`; the volume was renamed alongside it, because a volume
-holding the old v4 weights would have been mounted over the new ones rather than
-re-seeded. (Never run `docker compose down -v` to clean up — it also drops `pgdata`.)
-
-**opencv.** There is exactly one opencv distribution now: paddlex requires
-`opencv-contrib-python==4.10.0.84` and nothing else in the graph wants an opencv, so
-`requirements.txt` pins none. Under 2.7.3 three distributions fought over
-`site-packages/cv2` and install order decided which won. `cv2.ximgproc.createEdgeDrawing`
-(needed by `pipeline/shape_detector.py`) is therefore present by construction; the
-Dockerfile still asserts it at build time.
-
-**Why WebP uploads are still rejected (HTTP 400).**
-No longer a live mitigation: opencv 4.10.0.84 carries a libwebp with CVE-2023-4863 fixed
-(the fix landed in 4.8.1.78). The guard is kept as defence-in-depth — WebP is not a
-format architectural drawings arrive in, so refusing it costs nothing, and it is checked
-by `RIFF....WEBP` magic bytes rather than `Content-Type`, because `cv2.imdecode` detects
-format from content.
-
-**Known advisories.** The two `paddlepaddle 2.6.2` command-injection advisories
-(PYSEC-2026-1754/-1756) are resolved by this migration — they were fixed on the 3.x line,
-and the tree is now on `paddlepaddle 3.3.1`.
-
 ---
 
 ## Further reading
