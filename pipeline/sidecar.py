@@ -45,6 +45,8 @@ def build_sidecar(
             # {"state": not_attempted|success|failed, "reason": str|None, "model": str|None}
             "llm_status": llm_status,
             "shape_label_status": shape_label_status,
+            # Element ids to review, most urgent first — see _review_queue.
+            "review_queue": _review_queue(elements),
             "median_text_height_px": median_text_height_px,
             # The honest "this page was too low-DPI to read reliably" signal. The
             # confidences alone don't say it: the Arabic recogniser reports ~0.65 on a
@@ -64,6 +66,33 @@ def build_sidecar(
     }
 
 
+def _review_queue(elements: list[Element]) -> list[str]:
+    """Ids of the text needing a human look, most urgent first.
+
+    The caller gets "next error" navigation for free instead of re-deriving the ordering from
+    the elements array. Worth doing because review time, not compute, is what this pipeline
+    actually costs: a page is seconds of CPU and minutes of someone reading it.
+
+    `highlight` is the single source of truth for "not verified" — it is already set by every
+    path that can leave a word unchecked, including the ones where the LLM never ran. Ordering
+    is deliberate:
+
+      1. numeric disagreement first. A wrong number makes a maths worksheet wrong; a wrong
+         letter makes it ugly. These can also carry a high confidence, so sorting by
+         confidence alone would bury them.
+      2. marking-column cells last. They are unreadable at these scan resolutions by
+         construction, and on test1 they are 8 of 13 flagged items — leaving them in
+         confidence order would put the least fixable work at the front of the queue.
+      3. least confident first within each group.
+    """
+    needing = [
+        e for e in elements
+        if isinstance(e, TextElement) and (e.highlight is not None or e.digit_disagreement)
+    ]
+    needing.sort(key=lambda e: (not e.digit_disagreement, e.margin_column, e.confidence))
+    return [e.id for e in needing]
+
+
 def _serialize(el: Element) -> dict:
     d = {
         "id": el.id,
@@ -76,6 +105,9 @@ def _serialize(el: Element) -> dict:
         d["confidence"] = el.confidence
         d["highlight"] = el.highlight
         d["llm_correction"] = el.llm_correction.model_dump() if el.llm_correction else None
+        d["digits_recovered"] = el.digits_recovered
+        d["digit_disagreement"] = el.digit_disagreement
+        d["margin_column"] = el.margin_column
     elif isinstance(el, SimpleShapeElement):
         d["shape"] = el.shape
         d["confidence"] = el.confidence

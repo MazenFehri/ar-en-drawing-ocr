@@ -16,6 +16,48 @@ def make_text_el(id_, text, x=0.1, y=0.05, lang="english", highlight=None):
     )
 
 
+def _body_xml(elements):
+    doc = Document(io.BytesIO(assemble_document(elements, crop_images={})))
+    return doc.element.body.xml
+
+
+def test_an_arabic_run_is_marked_complex_script():
+    """`w:bidi` sets the paragraph's base direction; `w:rtl` marks the run as complex-script.
+
+    Only the second makes the `w:szCs` written beside it mean anything — complex-script font
+    size applies to runs Word treats as complex-script, and without `w:rtl` an Arabic run was
+    never one, so szCs was being emitted and ignored on every Arabic line produced.
+    """
+    xml = _body_xml([make_text_el("t0", "غرفة المعيشة", lang="arabic")])
+    assert "<w:bidi/>" in xml
+    assert "<w:rtl/>" in xml
+
+
+def test_a_latin_run_is_not_marked_rtl():
+    xml = _body_xml([make_text_el("t0", "KITCHEN", lang="english")])
+    assert "<w:rtl/>" not in xml
+    assert "<w:bidi/>" not in xml
+
+
+def test_run_properties_are_in_schema_order():
+    """CT_RPr is a sequence, not a bag: sz, szCs, highlight, rtl. Word tolerates any order;
+    LibreOffice, validators and the .NET caller's parser are entitled not to."""
+    xml = _body_xml([make_text_el("t0", "غرفة", lang="arabic", highlight="red")])
+    rpr = re.search(r"<w:rPr>.*?</w:rPr>", xml, re.S).group(0)
+    positions = [rpr.index(tag) for tag in ("<w:sz ", "<w:szCs ", "<w:highlight ", "<w:rtl/>")]
+    assert positions == sorted(positions), rpr
+
+
+def test_digits_in_an_arabic_line_are_left_exactly_as_stored():
+    """No directional isolates are injected. The digits already resolve correctly under
+    UAX#9 inside an RTL run, so wrapping them would be a second correction applied to a
+    correct string — the same mistake as the visual-order reversal this pipeline deleted."""
+    xml = _body_xml([make_text_el("t0", "مجدي ب 8500 مي", lang="arabic")])
+    assert "8500" in xml
+    for control in ("⁦", "⁧", "⁨", "⁩", "‪", "‫", "‬"):
+        assert control not in xml
+
+
 def test_assemble_returns_bytes():
     elements = [make_text_el("t0", "entrance")]
     result = assemble_document(elements, crop_images={})

@@ -223,6 +223,20 @@ def _text_box_xml(text: str, left: int, top: int, cx: int, cy: int,
     ns_wps = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"'
     ns_w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
     bidi_tag = "<w:bidi/>" if is_rtl else ""
+    # `w:bidi` sets the *paragraph* base direction; `w:rtl` marks the *run* as complex-script.
+    # Only the second makes the `w:szCs` beside it mean anything — complex-script font size
+    # applies to runs Word considers complex-script, and without w:rtl this run was never one,
+    # so szCs was being written and ignored on every Arabic line the service has produced.
+    #
+    # Considered and rejected here: wrapping Latin digit runs in U+2066/U+2069 isolates. The
+    # digits in "مجدي ب 8500 مي" already resolve correctly under UAX#9 — European numbers
+    # following an Arabic letter become Arabic-number class by rule W2 and lay out properly
+    # inside the RTL run — so there is no observed defect to fix, and no way to observe one
+    # from here without rendering in real Word. Injecting invisible control characters into
+    # text that is already right is the same mistake as the visual-order bidi reversal this
+    # pipeline had to delete (see utils/bidi.py): a second correction applied to a correct
+    # string. Left alone deliberately, not overlooked.
+    rtl_tag = "<w:rtl/>" if is_rtl else ""
     hl_tag = (
         f'<w:highlight w:val="{_HIGHLIGHT_MAP[highlight]}"/>'
         if highlight and highlight in _HIGHLIGHT_MAP
@@ -244,7 +258,9 @@ def _text_box_xml(text: str, left: int, top: int, cx: int, cy: int,
         '<wps:txbx>'
         f'<w:txbxContent {ns_w}>'
         f'<w:p><w:pPr>{bidi_tag}</w:pPr>'
-        f'<w:r><w:rPr>{hl_tag}<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/></w:rPr>'
+        # rPr children in CT_RPr schema order: sz, szCs, highlight, rtl. Word tolerates any
+        # order, stricter consumers (LibreOffice, validators, the .NET caller's parser) do not.
+        f'<w:r><w:rPr><w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/>{hl_tag}{rtl_tag}</w:rPr>'
         f'<w:t xml:space="preserve">{safe_text}</w:t>'
         '</w:r></w:p>'
         '</w:txbxContent>'

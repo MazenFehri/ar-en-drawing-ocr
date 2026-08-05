@@ -28,6 +28,52 @@ def test_sidecar_has_required_keys():
     assert "page_dimensions" in result
 
 
+# --- review queue ----------------------------------------------------------------------
+
+def _reviewable(id_, conf, highlight="red", disagreement=False, margin=False):
+    return TextElement(
+        id=id_, bbox=BBox(x=0.1, y=0.1, w=0.2, h=0.03), content="x", language="english",
+        confidence=conf, highlight=highlight,
+        digit_disagreement=disagreement, margin_column=margin,
+    )
+
+
+def test_review_queue_is_empty_when_nothing_needs_review():
+    side = build_sidecar([make_text("t0", "clean", 0.99)], 100, 200, 5)
+    assert side["stats"]["review_queue"] == []
+
+
+def test_review_queue_puts_numeric_disagreement_first_however_confident():
+    """A wrong number makes a maths worksheet wrong; a wrong letter makes it ugly.
+
+    The disagreeing line here is the *most* confident of the three, so ordering by confidence
+    alone would bury it at the back — which is the whole reason this key exists.
+    """
+    elements = [
+        _reviewable("t0", 0.20),
+        _reviewable("t1", 0.55),
+        _reviewable("t2", 0.97, disagreement=True),
+    ]
+    assert build_sidecar(elements, 100, 200, 5)["stats"]["review_queue"] == ["t2", "t0", "t1"]
+
+
+def test_review_queue_sinks_marking_cells_to_the_back():
+    """Measured on test1: 8 of 13 flagged items are marking cells, and they are the least
+    fixable. In plain confidence order they would fill the front of the queue."""
+    elements = [
+        _reviewable("cell0", 0.19, margin=True),
+        _reviewable("prose", 0.60),
+        _reviewable("cell1", 0.27, margin=True),
+    ]
+    queue = build_sidecar(elements, 100, 200, 5)["stats"]["review_queue"]
+    assert queue == ["prose", "cell0", "cell1"]
+
+
+def test_review_queue_orders_the_rest_least_confident_first():
+    elements = [_reviewable("t0", 0.70), _reviewable("t1", 0.30), _reviewable("t2", 0.50)]
+    assert build_sidecar(elements, 100, 200, 5)["stats"]["review_queue"] == ["t1", "t2", "t0"]
+
+
 def test_sidecar_page_dimensions():
     result = build_sidecar([], 1000, 1500, 350)
     assert result["page_dimensions"]["width_px"] == 1000
