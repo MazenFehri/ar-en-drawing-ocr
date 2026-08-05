@@ -506,7 +506,7 @@ def test_the_donor_is_only_consulted_for_crops_that_came_back_arabic():
 
     with patch.object(ocr, "_recognise", fake_recognise):
         latin_only = [("entrance", 0.97), ("3.5m", 0.98), ("KITCHEN", 0.99)]
-        assert ocr._recover_dropped_digits(latin_only, crops) == latin_only
+        assert ocr._recover_dropped_digits(latin_only, crops) == (latin_only, {})
         assert called == []
 
         mixed = [("entrance", 0.97), ("غرفة النوم", 0.92), ("KITCHEN", 0.99)]
@@ -521,3 +521,52 @@ def test_arabic_indic_digits_are_left_alone():
     is exactly why _DIGIT_RUN spells out [0-9]."""
     assert _splice_digits("ما هو ثمن العصير؟", "ما هو ثمن العصير؟ ٢") == "ما هو ثمن العصير؟"
     assert _splice_digits("و د", "و ١ د") == "و د"
+
+
+# --- numeric-integrity reporting (see _digit_notes) -------------------------------------
+
+@pytest.mark.parametrize("primary,donor,number", _REAL_DROPS)
+def test_a_recovered_number_is_reported_as_recovered(primary, donor, number):
+    import pipeline.ocr as ocr
+    spliced = _splice_digits(primary, donor)
+    assert ocr._digit_notes(primary, donor, spliced) == ([number], [])
+
+
+def test_a_number_the_splice_refused_is_reported_as_unplaced():
+    """The case nobody can audit from the output alone.
+
+    The donor saw a number and the splice — rightly — would not place it, so the page ends
+    up without that value and reads exactly as though it never had one. Refusing to splice
+    is correct; refusing *silently* is not.
+    """
+    import pipeline.ocr as ocr
+    primary, donor = "فريق الأسود", "99999 xyzzy qwerty"
+    spliced = _splice_digits(primary, donor)
+    assert spliced == primary, "precondition: this donor must be rejected"
+    assert ocr._digit_notes(primary, donor, spliced) == ([], ["99999"])
+
+
+def test_two_readers_agreeing_on_a_number_is_not_a_disagreement():
+    import pipeline.ocr as ocr
+    primary = donor = "المبلغ 100 دينار"
+    spliced = _splice_digits(primary, donor)
+    assert ocr._digit_notes(primary, donor, spliced) == ([], [])
+
+
+def test_the_disagreement_travels_out_of_recovery():
+    """A rejected donor number must reach the caller, not die inside the splice."""
+    import pipeline.ocr as ocr
+    crops = [np.ones((20, 60, 3), dtype=np.uint8)]
+    with patch.object(ocr, "_recognise", lambda model, batch: [("99999 xyzzy qwerty", 0.8)]):
+        readings, notes = ocr._recover_dropped_digits([("فريق الأسود", 0.91)], crops)
+    assert readings == [("فريق الأسود", 0.91)], "the text itself is untouched"
+    assert notes == {0: ([], ["99999"])}
+
+
+def test_a_clean_arabic_line_produces_no_note_at_all():
+    """Notes are sparse — a page where both readers agree everywhere carries no entries."""
+    import pipeline.ocr as ocr
+    crops = [np.ones((20, 60, 3), dtype=np.uint8)]
+    with patch.object(ocr, "_recognise", lambda model, batch: [("غرفة النوم", 0.9)]):
+        _, notes = ocr._recover_dropped_digits([("غرفة النوم", 0.92)], crops)
+    assert notes == {}

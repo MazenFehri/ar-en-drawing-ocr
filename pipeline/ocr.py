@@ -20,7 +20,7 @@ the two-pass v4 design. A naive version bump that kept two full passes measured 
 """
 import difflib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -177,6 +177,13 @@ class OcrWord:
     confidence: float
     bbox_px: dict        # {x, y, w, h}
     flagged: bool = False
+    # Numeric-integrity signal from the digit donor. `digits_recovered` lists the runs put
+    # back into this line; `digit_disagreement` says the donor saw a number here that could
+    # NOT be placed, so a value is probably missing from the text and no one can say which.
+    # See _recover_dropped_digits. Both travel to the sidecar so the caller can force review
+    # on exactly these lines instead of trusting the page as a whole.
+    digits_recovered: list[str] = field(default_factory=list)
+    digit_disagreement: bool = False
 
 
 def run_ocr(
@@ -227,18 +234,21 @@ def run_ocr(
             for n, arabic_reading in zip(unsure, secondary):
                 readings[n] = _pick(primary[n], arabic_reading)
 
-    readings = _recover_dropped_digits(readings, [crops[i] for i in keep])
+    readings, digit_notes = _recover_dropped_digits(readings, [crops[i] for i in keep])
 
     words = []
     for n, i in enumerate(keep):
         text, conf = readings[n]
         if not text:
             continue
+        recovered, unplaced = digit_notes.get(n, ([], []))
         words.append(OcrWord(
             text=text,
             confidence=conf,
             bbox_px=_poly_bbox(polys[i], scale),
             flagged=conf < confidence_threshold,
+            digits_recovered=recovered,
+            digit_disagreement=bool(unplaced),
         ))
     # Top-to-bottom, left-to-right, so the output order is a property of the page rather
     # than of detector iteration order. Reading order proper is redone in
@@ -266,9 +276,32 @@ def _pick(
     return latin
 
 
+def _digit_notes(primary: str, donor: str, spliced: str) -> tuple[list[str], list[str]]:
+    """(recovered, unplaced) digit runs, derived from what the splice actually did.
+
+    Computed from the three strings rather than threaded out of _splice_digits' opcode loop,
+    which keeps that function's contract (and its ten regression assertions) untouched.
+
+    `unplaced` is the interesting half and the reason this exists. The donor can see a number
+    that the splice then refuses to place — because the two readings disagree about the whole
+    strip, or because the alignment offers no gap to put it in. Silently discarding that is
+    the one outcome nobody can audit: the page ends up missing a value and reads as though it
+    never had one. Reported instead, so the caller can demand a human look at that line.
+
+    Membership is a substring test, matching the `missing` check in _splice_digits — so a
+    donor run of "2" counts as already-present when primary holds "27250". Deliberate: it is
+    the same rule both halves are judged by, and a looser one would flag every line whose
+    numbers merely differ in grouping.
+    """
+    seen = _DIGIT_RUN.findall(donor)
+    recovered = [run for run in seen if run not in primary and run in spliced]
+    unplaced = [run for run in seen if run not in primary and run not in spliced]
+    return recovered, unplaced
+
+
 def _recover_dropped_digits(
     readings: list[tuple[str, float]], crops: list[np.ndarray],
-) -> list[tuple[str, float]]:
+) -> tuple[list[tuple[str, float]], dict[int, tuple[list[str], list[str]]]]:
     """Put back the numbers ARABIC_REC_MODEL silently deletes from Arabic sentences.
 
     arabic_PP-OCRv5_mobile_rec drops Western digits embedded mid-line in RTL text, usually
@@ -287,20 +320,28 @@ def _recover_dropped_digits(
 
     Only crops whose chosen reading is Arabic are re-read, so a page with no Arabic pays
     nothing, and the second pass sees at most the Arabic subset rather than the page.
+
+    Returns (readings, notes), where notes maps a reading's index to its
+    (recovered, unplaced) digit runs and omits indices where neither happened.
     """
     targets = [
         n for n, (text, _) in enumerate(readings)
         if text and is_arabic(text) and n < len(crops)
     ]
     if not targets:
-        return readings
+        return readings, {}
 
     donor = _recognise(ARABIC_DIGIT_DONOR_MODEL, [crops[n] for n in targets])
     out = list(readings)
+    notes: dict[int, tuple[list[str], list[str]]] = {}
     for n, (donor_text, _) in zip(targets, donor):
         text, conf = out[n]
-        out[n] = (_splice_digits(text, donor_text), conf)
-    return out
+        spliced = _splice_digits(text, donor_text)
+        out[n] = (spliced, conf)
+        recovered, unplaced = _digit_notes(text, donor_text, spliced)
+        if recovered or unplaced:
+            notes[n] = (recovered, unplaced)
+    return out, notes
 
 
 def _splice_digits(primary: str, donor: str) -> str:

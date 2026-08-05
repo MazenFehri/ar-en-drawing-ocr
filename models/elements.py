@@ -24,6 +24,19 @@ class TextElement(BaseModel):
     confidence: float
     llm_correction: Optional[LLMCorrection] = None
     highlight: Optional[Literal["yellow", "red"]] = None
+    # Numeric integrity, from the two-recogniser digit check in pipeline/ocr.py.
+    # digits_recovered: runs the donor put back into this line — the fix, working.
+    # digit_disagreement: the donor saw a number here that could not be placed, so a value
+    # is probably missing and nobody can say which. Independent of `confidence`: the Arabic
+    # recogniser reports a healthy score on a line it silently deleted a number from, so a
+    # confident line can still carry this. Consumers should force review when it is true.
+    digits_recovered: list[str] = []
+    digit_disagreement: bool = False
+    # True for cells of an edge marking column (see layout_reconstructor.MARGIN_MIN_CELLS).
+    # They are real content and keep their position in the document, but they belong to no
+    # sentence — consumers building a text stream, or feeding neighbouring words to a model
+    # as context, should skip them.
+    margin_column: bool = False
     # id of the smallest detected shape (models/elements.ComplexShapeElement /
     # SimpleShapeElement) whose bbox strictly contains this word's bbox, e.g. the
     # class box a UML attribute label sits inside. None is the common case (most

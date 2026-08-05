@@ -11,6 +11,110 @@ def make_word(text, x, y, w=100, h=20, conf=0.9, flagged=False):
     return OcrWord(text=text, confidence=conf, bbox_px={"x": x, "y": y, "w": w, "h": h}, flagged=flagged)
 
 
+def test_a_marking_column_is_lifted_out_of_the_sentences():
+    """Geometry from test1.jpeg, scaled to this page: cells at 87.5% of the width, each
+    3.2% wide, each sharing its vertical centre with a body line beside it. That overlap is
+    the bug — without the split they sort *into* the sentences.
+    """
+    body = [
+        make_word("السند 1 للاحتفال بعيد ميلاد", 90, 200, w=740),
+        make_word("أحسب المبلغ الذي أحضرته رانية", 420, 400, w=410),
+        make_word("أحسب نقود أحمد", 600, 600, w=230),
+    ]
+    cells = [make_word("د", 875, y, w=32) for y in (190, 390, 590, 790)]
+
+    elements = reconstruct_layout(body + cells, [], IMG_W, IMG_H)
+
+    assert [e.content for e in elements[:3]] == [w.text for w in body], "prose stays contiguous"
+    assert [e.content for e in elements[3:]] == ["د"] * 4, "cells follow, top to bottom"
+    assert [e.margin_column for e in elements] == [False] * 3 + [True] * 4
+    # Lifted out of the reading order, not out of the document.
+    assert elements[3].bbox.x == pytest.approx(0.875)
+
+
+def test_narrow_marks_in_the_middle_of_the_page_are_left_in_place():
+    """The same worksheet's coin tokens are exactly as narrow as the marking cells.
+
+    Width cannot be what separates them, which is why the edge band and the alignment
+    tolerance carry the decision.
+    """
+    words = [make_word("أواصل تمثيل هذا المبلغ", 300, 400, w=400)] + [
+        make_word(text, x, 400, w=32) for text, x in (("30", 460), ("2", 540), ("½", 620))
+    ]
+    elements = reconstruct_layout(words, [], IMG_W, IMG_H)
+    assert not any(e.margin_column for e in elements)
+
+
+def test_a_table_row_label_column_is_not_a_margin():
+    """Regression, found by running this on the real pages rather than on fixtures.
+
+    test3's S1/S2/S3 row labels satisfy every condition but the one that matters — narrow,
+    hard against the left edge, aligned to the pixel, three of them. What makes them body
+    text is that they share their horizontal span with the prose. An earlier version of this
+    rule swallowed them, and 19 of class-diagram's UML attributes with them.
+    """
+    words = [make_word("Find initial basic feasible solution", 10, 500, w=880)] + [
+        make_word(text, 20, y, w=35) for text, y in (("S1", 100), ("S2", 200), ("S3", 300))
+    ]
+    elements = reconstruct_layout(words, [], IMG_W, IMG_H)
+    assert not any(e.margin_column for e in elements)
+
+
+def test_two_cells_at_an_edge_are_not_a_column():
+    words = [
+        make_word("north elevation", 100, 100, w=600),
+        make_word("A", 950, 200, w=30),
+        make_word("B", 950, 300, w=30),
+    ]
+    elements = reconstruct_layout(words, [], IMG_W, IMG_H)
+    assert not any(e.margin_column for e in elements)
+
+
+def test_edge_labels_that_do_not_share_an_x_are_not_a_column():
+    """A drawing may carry several small labels near a border. A printed marking column
+    shares an x to within a pixel or two; scattered annotations do not."""
+    words = [make_word("floor plan", 100, 100, w=600)] + [
+        make_word(text, x, y, w=15)
+        for text, x, y in (("A", 870, 200), ("B", 940, 400), ("C", 985, 600))
+    ]
+    elements = reconstruct_layout(words, [], IMG_W, IMG_H)
+    assert not any(e.margin_column for e in elements)
+
+
+def test_a_numeric_disagreement_ships_marked_however_confident_the_line_is():
+    """The confidence score cannot carry this signal, so the highlight must not depend on it.
+
+    The Arabic recogniser reports a healthy score on a line it silently deleted a number
+    from — that score is its opinion of the Arabic, which it read correctly. A page whose
+    only defect is a missing amount would otherwise look clean at every threshold.
+    """
+    word = make_word("مبلغ مي الواحدة", 10, 10, conf=0.97)
+    word.digit_disagreement = True
+    word.digits_recovered = []
+
+    element = reconstruct_layout([word], [], IMG_W, IMG_H)[0]
+    assert element.digit_disagreement is True
+    assert element.highlight == "red"
+
+
+def test_a_clean_line_is_not_marked():
+    element = reconstruct_layout([make_word("غرفة النوم", 10, 10, conf=0.61)], [], IMG_W, IMG_H)[0]
+    assert element.digit_disagreement is False
+    assert element.digits_recovered == []
+    # Low confidence alone is the LLM stage's business, not this one's.
+    assert element.highlight is None
+
+
+def test_a_recovered_number_travels_to_the_element_without_marking_it():
+    """Recovery is the fix working — it is reported, but it is not a warning."""
+    word = make_word("فاحضر مجدي 27250 مي", 10, 10)
+    word.digits_recovered = ["27250"]
+
+    element = reconstruct_layout([word], [], IMG_W, IMG_H)[0]
+    assert element.digits_recovered == ["27250"]
+    assert element.highlight is None
+
+
 def test_to_relative_bbox():
     bbox = to_relative_bbox({"x": 100, "y": 150, "w": 200, "h": 50}, IMG_W, IMG_H)
     assert isinstance(bbox, BBox)
