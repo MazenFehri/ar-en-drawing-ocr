@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import random
+import re
 import threading
 import time
 import cv2
@@ -129,6 +130,25 @@ def _build_system_prompt(chunk: list[TextElement]) -> str:
     parts.append(_SCRIPT_RULE)
     parts.append("Return ONLY a valid JSON array, no explanation.")
     return "\n".join(parts)
+
+
+# Digit runs, for the numeric guard below. Spelled out rather than imported from pipeline.ocr:
+# a guard that shares a pattern with the code it is guarding inherits its blind spots, and this
+# one deliberately covers Arabic-Indic digits too, which ocr._DIGIT_RUN excludes on purpose
+# (the Arabic recogniser reads those correctly, so they are not recoverable losses there — but
+# the LLM rewriting one is just as destructive as rewriting a Western digit).
+_NUMBER_RUN = re.compile(r"[0-9٠-٩۰-۹]+")
+
+
+def _alters_numbers(original: str, corrected: str) -> bool:
+    """True when the correction does not preserve the exact sequence of digit runs.
+
+    Both directions are refused: changing a number, dropping one, and inventing one that was
+    never on the page. On a maths worksheet a wrong digit makes the exercise wrong, while a
+    wrong letter makes it ugly — the two are not comparable, and CER weighs them identically,
+    which is why this is a hard guard and not a threshold.
+    """
+    return _NUMBER_RUN.findall(original) != _NUMBER_RUN.findall(corrected)
 
 
 def _introduces_unseen_script(chunk_lang: str, corrected: str) -> bool:
@@ -302,10 +322,22 @@ def apply_corrections(
     TOTAL_LLM_BUDGET_SECONDS). None (the default) computes a fresh full-budget
     deadline for this call alone, same as before this param existed.
     """
+    # Marking-column cells are excluded from what gets *sent*, never from what gets *marked*.
+    # They are empty printed boxes for a teacher to write a score in — unreadable at these
+    # scan resolutions by construction, and asking a vision model to re-read 'خا' cannot
+    # succeed. Measured on test1: 8 of 13 flagged items were these, so they were consuming
+    # most of a budget the 5 real prose lines needed. Falling out of `flagged` means no
+    # correction ever keys back to them, so the apply loop below marks them unverified via
+    # its no-answer branch, which is the correct outcome for a box nobody could read.
     flagged = [e for e in elements
-               if isinstance(e, TextElement) and e.confidence < confidence_threshold]
+               if isinstance(e, TextElement) and e.confidence < confidence_threshold
+               and not e.margin_column]
     if not flagged:
-        return elements, _status("not_attempted", "no_flagged_words")
+        # _mark_unverified, not `elements`: a page whose only sub-threshold text is marking
+        # cells has nothing worth sending, but those cells must still ship highlighted rather
+        # than passing as read.
+        return _mark_unverified(elements, confidence_threshold), _status(
+            "not_attempted", "no_flagged_words")
 
     from app.config import settings
     if not settings.openrouter_api_key:
@@ -332,6 +364,13 @@ def apply_corrections(
     if settings.shape_context_enabled:
         sibling_context_by_id = {
             el.id: _sibling_context(el, elements, confidence_threshold) for el in flagged
+        }
+    # The prose counterpart — the confident lines either side of a flagged one. Also off by
+    # default and for the same measured reason; see settings.sentence_context_enabled.
+    sentence_context_by_id: dict[str, list[str]] = {}
+    if settings.sentence_context_enabled:
+        sentence_context_by_id = {
+            el.id: _sentence_context(el, elements, confidence_threshold) for el in flagged
         }
 
     # Keyed by element id, not by OCR text: the model may alter the string it
@@ -361,7 +400,8 @@ def apply_corrections(
 
     for chunk in _chunks(flagged, MAX_WORDS_PER_CALL):
         chunk_lang = _chunk_language(chunk)
-        content = _build_word_content(page, chunk, sibling_context_by_id)
+        content = _build_word_content(
+            page, chunk, sibling_context_by_id, sentence_context_by_id)
         try:
             corrections, chunk_status = _request_with_fallback(
                 client, _build_system_prompt(chunk), content, deadline, failed_models,
@@ -404,6 +444,36 @@ def apply_corrections(
                 updated.append(el)
                 continue
             certainty = corr_data.get("certainty", 0.0)
+            # The model saying "I could not read this" is an answer, not a correction. The
+            # prompt asks for an empty string in that case; measured, this model instead
+            # returns a placeholder like "<unknown>" at certainty 0.0, which is non-empty and
+            # so sailed through the check above and overwrote real OCR text with the word
+            # "<unknown>". Trust the certainty, not the shape of the string.
+            if certainty <= 0.0:
+                logger.info(
+                    "Discarding correction for %s: %r -> %r at certainty 0.0 is the model "
+                    "declining to read the crop", el.id, el.content, corrected_text,
+                )
+                updated.append(el.model_copy(update={"highlight": _UNVERIFIED_HIGHLIGHT}))
+                continue
+            # Numbers are the one thing this model must not be allowed to rewrite. Measured on
+            # test1 with a working key: it returned '45' -> '43' at certainty 1.00, and
+            # separately dropped a 27250 the v3 digit donor had just recovered. Both at full
+            # claimed confidence, so certainty cannot gate this.
+            #
+            # Deliberately rejects the WHOLE correction rather than restoring the digits into
+            # it: a reading that got the number wrong has demonstrated it was not reading this
+            # crop carefully, and its letters are not worth more than the OCR's. Same
+            # philosophy as _introduces_unseen_script — refuse the class of change that has
+            # observed harm and no observed benefit. A genuine OCR digit misread is left to
+            # the two-recogniser splice in pipeline/ocr.py, which is measured and does work.
+            if _alters_numbers(el.content, corrected_text):
+                logger.info(
+                    "Discarding correction for %s: %r -> %r changes the numbers OCR read",
+                    el.id, el.content, corrected_text,
+                )
+                updated.append(el.model_copy(update={"highlight": _UNVERIFIED_HIGHLIGHT}))
+                continue
             updated.append(el.model_copy(update={
                 "content": corrected_text,
                 "llm_correction": LLMCorrection(
@@ -688,8 +758,49 @@ def _sibling_context(el: TextElement, elements: list[Element], confidence_thresh
     ]
 
 
+# Confident lines taken from each side of a flagged one. Two is a deliberate ceiling, not a
+# tuning knob waiting to be raised: every line added is prompt the model reads instead of
+# looking at the crop, which is the documented failure mode of this whole family of features
+# (see the module header — a glossary in the prompt got copied into an answer at certainty
+# 1.00). Two lines is enough to establish what a page is *about*, which is all this is for.
+SENTENCE_CONTEXT_NEIGHBOURS = 2
+
+
+def _sentence_context(
+    el: TextElement, elements: list[Element], confidence_threshold: float,
+) -> list[str]:
+    """The confident lines around a flagged one, in reading order.
+
+    Complements _sibling_context rather than duplicating it. That one asks "what else is in
+    this box?" and returns nothing on a page with no boxes; this asks "what does the text
+    around here say?" and works precisely on the dense prose pages where the other is empty.
+    A word misread as غرفه is recoverable from the sentence it sits in even when no shape on
+    the page contains it.
+
+    Note these are whole lines: the detector returns line/region polygons, not word boxes, so
+    one TextElement is typically a full phrase. The neighbours are therefore genuine sentence
+    context, not adjacent words.
+
+    Margin-column cells are excluded — they belong to no sentence, and feeding 'خا' to a model
+    as context is worse than feeding it nothing. That exclusion is why this depends on the
+    margin split landing first.
+    """
+    ordered = [
+        e for e in elements
+        if isinstance(e, TextElement) and not e.margin_column and e.content.strip()
+    ]
+    position = next((n for n, e in enumerate(ordered) if e.id == el.id), None)
+    if position is None:
+        return []
+    span = SENTENCE_CONTEXT_NEIGHBOURS
+    window = ordered[max(0, position - span):position] + ordered[position + 1:position + 1 + span]
+    return [e.content for e in window if e.confidence >= confidence_threshold]
+
+
 def _build_word_content(
-    page: np.ndarray, chunk: list[TextElement], sibling_context_by_id: dict[str, list[str]] | None = None,
+    page: np.ndarray, chunk: list[TextElement],
+    sibling_context_by_id: dict[str, list[str]] | None = None,
+    sentence_context_by_id: dict[str, list[str]] | None = None,
 ) -> list[dict]:
     content = []
     for el in chunk:
@@ -703,7 +814,8 @@ def _build_word_content(
             _, buf = cv2.imencode(".jpg", np.zeros((1, 1, 3), dtype=np.uint8))
         b64 = base64.standard_b64encode(buf.tobytes()).decode("utf-8")
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    content.append({"type": "text", "text": _build_prompt(chunk, sibling_context_by_id)})
+    content.append({"type": "text", "text": _build_prompt(
+        chunk, sibling_context_by_id, sentence_context_by_id)})
     return content
 
 
@@ -977,18 +1089,26 @@ def _parse_json_array(content: str) -> list[dict]:
     return json.loads(text)
 
 
-def _build_prompt(flagged: list[TextElement], sibling_context_by_id: dict[str, list[str]] | None = None) -> str:
+def _build_prompt(
+    flagged: list[TextElement],
+    sibling_context_by_id: dict[str, list[str]] | None = None,
+    sentence_context_by_id: dict[str, list[str]] | None = None,
+) -> str:
     # Index-based, matching _build_shape_content's "N images, in order" convention:
     # the model answers by image position, not by echoing the string back, so a
     # word the model rewrites or a duplicate word at a different confidence still
     # keys back to the right element (see correction_by_id in apply_corrections).
     sibling_context_by_id = sibling_context_by_id or {}
+    sentence_context_by_id = sentence_context_by_id or {}
     words = []
     for i, e in enumerate(flagged):
         entry = {"index": i, "current_guess": e.content, "confidence": round(e.confidence, 3)}
         siblings = sibling_context_by_id.get(e.id)
         if siblings:
             entry["nearby_confident_labels"] = siblings
+        surrounding = sentence_context_by_id.get(e.id)
+        if surrounding:
+            entry["surrounding_lines"] = surrounding
         words.append(entry)
 
     context_note = (
@@ -999,6 +1119,18 @@ def _build_prompt(flagged: list[TextElement], sibling_context_by_id: dict[str, l
         "same text."
         if any("nearby_confident_labels" in w for w in words) else ""
     )
+    # Same warning, deliberately repeated rather than merged: these two context kinds arrive
+    # independently, and the "do not copy this" instruction has to travel with whichever one
+    # is actually present. The module header records what happens when text in the prompt
+    # gets treated as an answer.
+    if any("surrounding_lines" in w for w in words):
+        context_note += (
+            " Some entries include \"surrounding_lines\": the confidently-read lines "
+            "immediately before and after the flagged one on the page. They tell you what "
+            "the page is about, which can settle an ambiguous letter. They are NOT part of "
+            "the crop you are reading: never copy them into your answer, never merge them "
+            "with it, and never let them talk you out of what the image plainly shows."
+        )
     return (
         f"{len(flagged)} cropped word images, in order, each padded with a little "
         "surrounding context and upscaled if small. Below is the OCR's current guess "

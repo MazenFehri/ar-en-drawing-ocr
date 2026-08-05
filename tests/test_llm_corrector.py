@@ -32,7 +32,8 @@ def _fake_page_bytes(w=200, h=200):
 FAKE_PAGE = _fake_page_bytes()
 
 
-def make_text_el(id_, text, conf, x=0.0, y=0.0, w=0.1, h=0.02, container_shape_id=None):
+def make_text_el(id_, text, conf, x=0.0, y=0.0, w=0.1, h=0.02, container_shape_id=None,
+                 margin_column=False):
     return TextElement(
         id=id_,
         bbox=BBox(x=x, y=y, w=w, h=h),
@@ -40,6 +41,7 @@ def make_text_el(id_, text, conf, x=0.0, y=0.0, w=0.1, h=0.02, container_shape_i
         language="english" if text.isascii() else "arabic",
         confidence=conf,
         container_shape_id=container_shape_id,
+        margin_column=margin_column,
     )
 
 
@@ -1042,6 +1044,218 @@ def test_context_enabled_sends_confident_sibling_in_same_shape(mock_client_fn):
     sent_text = [c["text"] for c in _sent_content(mock_client_fn.return_value) if c["type"] == "text"][0]
     assert "Bank" in sent_text
     assert "Unrelated" not in sent_text  # different shape, must not leak in as context
+
+
+# --- guards found by measuring against a live model ------------------------------------
+# All three cases below were produced by the configured model on samples/test1.jpeg, at the
+# claimed certainties shown. None are hypothetical.
+
+def test_alters_numbers_detects_every_direction():
+    from pipeline.llm_corrector import _alters_numbers
+    assert _alters_numbers("45", "43") is True                    # observed at certainty 1.00
+    assert _alters_numbers("مجدي 27250 مي", "مجدي مي") is True     # observed: dropped
+    assert _alters_numbers("غرفة النوم", "غرفة 3 النوم") is True   # invented
+    assert _alters_numbers("و ١٢٣ د", "و ٤٥٦ د") is True           # Arabic-Indic too
+    # Letters may change freely — that is what correction is for.
+    assert _alters_numbers("فاحضرمجدي 27250 مي", "فأحضر مجدي 27250 مي") is False
+    assert _alters_numbers("غرفه", "غرفة") is False
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_a_correction_that_rewrites_a_number_is_refused(mock_client_fn):
+    """Observed: '45' -> '43' at certainty 1.00. A wrong digit makes a maths worksheet wrong,
+    so certainty cannot be what gates this."""
+    mock_client_fn.return_value = _mock_client(
+        '[{"index": 0, "corrected": "43", "certainty": 1.0}]')
+    result, _ = apply_corrections(
+        [make_text_el("t0", "45", 0.53)], FAKE_PAGE, confidence_threshold=0.75)
+
+    assert result[0].content == "45", "OCR's number must survive"
+    assert result[0].llm_correction is None
+    assert result[0].highlight is not None, "refused, so it ships for review"
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_a_correction_that_drops_a_recovered_number_is_refused(mock_client_fn):
+    """The worst observed case: the model returned the surrounding lines' text and took the
+    27250 with it — undoing a number the two-recogniser splice had just recovered."""
+    original = "فاحضرمجدي 27250 مي واحضرت رانية مبلغا يقل عن مبلغ"
+    mock_client_fn.return_value = _mock_client(
+        '[{"index": 0, "corrected": "فإذا أهدى مجدي بأقل ما يمكن من القطع", "certainty": 0.85}]')
+    result, _ = apply_corrections(
+        [make_text_el("t0", original, 0.71)], FAKE_PAGE, confidence_threshold=0.75)
+
+    assert "27250" in result[0].content
+    assert result[0].content == original
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_a_letters_only_correction_is_still_applied(mock_client_fn):
+    """The guard must not block what correction exists to do."""
+    mock_client_fn.return_value = _mock_client(
+        '[{"index": 0, "corrected": "فأحضر مجدي 27250 مي", "certainty": 0.9}]')
+    result, _ = apply_corrections(
+        [make_text_el("t0", "فاحضرمجدي 27250 مي", 0.71)], FAKE_PAGE, confidence_threshold=0.75)
+
+    assert result[0].content == "فأحضر مجدي 27250 مي"
+    assert result[0].llm_correction is not None
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_a_placeholder_at_zero_certainty_never_reaches_the_document(mock_client_fn):
+    """The prompt asks for an empty string when a crop can't be read. Measured, this model
+    returns '<unknown>' at certainty 0.0 instead — non-empty, so the empty-string check let it
+    through and the literal word '<unknown>' was written over real OCR text."""
+    mock_client_fn.return_value = _mock_client(
+        '[{"index": 0, "corrected": "<unknown>", "certainty": 0.0}]')
+    result, _ = apply_corrections(
+        [make_text_el("t0", "أمتل قود مجدي", 0.71)], FAKE_PAGE, confidence_threshold=0.75)
+
+    assert result[0].content == "أمتل قود مجدي"
+    assert result[0].llm_correction is None
+    assert result[0].highlight is not None
+
+
+# --- marking cells are marked, never sent ----------------------------------------------
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_marking_cells_are_never_sent_to_the_model(mock_client_fn):
+    """They are empty printed score boxes — unreadable by construction, so re-reading them
+    cannot succeed. Measured on test1 they were 8 of 13 flagged items, consuming most of a
+    budget the real prose lines needed."""
+    mock_client_fn.return_value = _mock_client(MOCK_LLM_RESPONSE)
+    elements = [
+        make_text_el("t0", "entrnce", 0.40),
+        make_text_el("t1", "خا", 0.19, margin_column=True),
+    ]
+    apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+
+    sent_text = [c["text"] for c in _sent_content(mock_client_fn.return_value) if c["type"] == "text"][0]
+    assert "entrnce" in sent_text
+    assert "خا" not in sent_text
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_an_unsent_marking_cell_still_ships_highlighted(mock_client_fn):
+    """Excluded from what is *sent*, never from what is *marked*. A cell nobody could read
+    must not pass as read."""
+    mock_client_fn.return_value = _mock_client(MOCK_LLM_RESPONSE)
+    elements = [
+        make_text_el("t0", "entrnce", 0.40),
+        make_text_el("t1", "خا", 0.19, margin_column=True),
+    ]
+    result, _ = apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+    assert {e.id: e.highlight for e in result}["t1"] is not None
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("pipeline.llm_corrector._get_client")
+def test_a_page_of_only_marking_cells_sends_nothing_but_marks_everything(mock_client_fn):
+    """The early-return path. Nothing worth sending, but the cells must still be flagged."""
+    mock_client_fn.return_value = _mock_client(MOCK_LLM_RESPONSE)
+    elements = [make_text_el(f"t{i}", "خا", 0.2, margin_column=True) for i in range(3)]
+    result, status = apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+
+    assert status["reason"] == "no_flagged_words"
+    assert mock_client_fn.return_value.chat.completions.create.call_count == 0
+    assert all(e.highlight is not None for e in result)
+
+
+# --- sentence context: the confident lines around a flagged one ------------------------
+# The prose counterpart to the shape context above. See app.config.settings
+# .sentence_context_enabled for why this is also off by default.
+
+def test_build_prompt_omits_sentence_context_when_none_given():
+    """The settings-off path must produce byte-identical output to before the feature."""
+    prompt = _build_prompt([make_text_el("t0", "entrnce", 0.48)])
+    assert "surrounding_lines" not in prompt
+    assert "before and after" not in prompt
+
+
+def test_build_prompt_includes_surrounding_lines_when_given():
+    flagged = [make_text_el("t0", "أمتل قود", 0.48)]
+    prompt = _build_prompt(flagged, sentence_context_by_id={
+        "t0": ["التعليمة :", "أحسب المبلغ الذي أحضرته رانية"]})
+    assert "surrounding_lines" in prompt
+    assert "أحسب المبلغ الذي أحضرته رانية" in prompt
+    # The scar this whole family of features carries: prompt text getting treated as an
+    # answer. The instruction not to copy has to be present whenever the context is.
+    assert "never copy them into your answer" in prompt
+
+
+def test_build_prompt_skips_an_empty_sentence_context_list():
+    prompt = _build_prompt([make_text_el("t0", "entrnce", 0.48)],
+                           sentence_context_by_id={"t0": []})
+    assert "surrounding_lines" not in prompt
+
+
+def test_sentence_context_takes_confident_neighbours_in_reading_order():
+    from pipeline.llm_corrector import _sentence_context
+    elements = [
+        make_text_el("t0", "line one", 0.95),
+        make_text_el("t1", "line two", 0.95),
+        make_text_el("t2", "flagged", 0.40),
+        make_text_el("t3", "line four", 0.95),
+        make_text_el("t4", "line five", 0.95),
+        make_text_el("t5", "line six", 0.95),   # outside the two-line window
+    ]
+    context = _sentence_context(elements[2], elements, 0.75)
+    assert context == ["line one", "line two", "line four", "line five"]
+
+
+def test_sentence_context_excludes_unconfident_neighbours_and_margin_cells():
+    """Two exclusions, both load-bearing.
+
+    An unconfident neighbour is itself a guess — passing it as context launders a guess into
+    evidence. A margin cell belongs to no sentence at all, and 'خا' as context is worse than
+    no context; that exclusion is why this depends on the margin split landing first.
+    """
+    from pipeline.llm_corrector import _sentence_context
+    elements = [
+        make_text_el("t0", "alsoguessed", 0.30),
+        make_text_el("t1", "خا", 0.95, margin_column=True),
+        make_text_el("t2", "flagged", 0.40),
+        make_text_el("t3", "solid line", 0.95),
+    ]
+    assert _sentence_context(elements[2], elements, 0.75) == ["solid line"]
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.sentence_context_enabled", False)
+@patch("pipeline.llm_corrector._get_client")
+def test_sentence_context_disabled_by_default(mock_client_fn):
+    mock_client_fn.return_value = _mock_client(MOCK_LLM_RESPONSE)
+    elements = [
+        make_text_el("t0", "confident neighbour", 0.95),
+        make_text_el("t1", "flagd", 0.40),
+    ]
+    apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+
+    sent_text = [c["text"] for c in _sent_content(mock_client_fn.return_value) if c["type"] == "text"][0]
+    assert "surrounding_lines" not in sent_text
+
+
+@patch("app.config.settings.openrouter_api_key", "test-key")
+@patch("app.config.settings.sentence_context_enabled", True)
+@patch("pipeline.llm_corrector._get_client")
+def test_sentence_context_enabled_reaches_the_outgoing_prompt(mock_client_fn):
+    mock_client_fn.return_value = _mock_client(MOCK_LLM_RESPONSE)
+    elements = [
+        make_text_el("t0", "confident neighbour", 0.95),
+        make_text_el("t1", "flagd", 0.40),
+        make_text_el("t2", "خا", 0.99, margin_column=True),
+    ]
+    apply_corrections(elements, FAKE_PAGE, confidence_threshold=0.75)
+
+    sent_text = [c["text"] for c in _sent_content(mock_client_fn.return_value) if c["type"] == "text"][0]
+    assert "confident neighbour" in sent_text
+    assert "خا" not in sent_text, "margin cells must never travel as sentence context"
 
 
 @patch("app.config.settings.openrouter_api_key", "test-key")

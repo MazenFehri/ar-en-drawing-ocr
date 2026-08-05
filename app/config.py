@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     # smaller tier. Flip on only once a model upgrade or a bigger measured benefit
     # justifies the risk.
     shape_context_enabled: bool = False
+    # Include the confident lines either side of a flagged one, in reading order, as context
+    # in its correction prompt. Distinct from shape_context_enabled above: that one is
+    # *spatial* (same detected box) and is empty on a prose page with no shapes, which is
+    # exactly where a misread word is most recoverable from the sentence around it.
+    #
+    # Same risk though, and the same reason it is a flag rather than unconditional: Kanerva
+    # et al. 2025 found added prompt context helps 27B/70B vision models and makes 8B-class
+    # ones worse, and the configured free model sits in the smaller tier. Measure on
+    # tools/eval.py --llm before turning this on for a given model.
+    sentence_context_enabled: bool = False
     database_url: str = "postgresql://ocr:ocr@localhost:5432/ocr_db"
     log_level: str = "INFO"
 
