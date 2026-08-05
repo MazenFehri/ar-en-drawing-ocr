@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OCR arabe & reconstruction fidèle de documents d'examen — Étude technique et de faisabilité</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Arabic:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&family=Amiri:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --encre:#101418;
+  --papier:#F1F3F1;
+  --blanc:#FFFFFF;
+  --repere:#00838F;
+  --detect:#B4005E;
+  --graphite:#5B6670;
+  --trame:#D8DBD7;
+  --ambre:#8A5A00;
+  --ambre-bg:#FBF3E4;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --cond:"IBM Plex Sans Condensed","Helvetica Neue",Arial,sans-serif;
+  --serif:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+  --ar:"IBM Plex Sans Arabic","Segoe UI",Tahoma,sans-serif;
+  --naskh:"Amiri","Traditional Arabic",serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--papier);color:var(--encre);
+  font-family:var(--serif);font-size:17px;line-height:1.62;
+  font-feature-settings:"kern","liga";
+}
+
+/* ---------- masthead ---------- */
+.masthead{border-bottom:1px solid var(--encre);background:var(--blanc)}
+.masthead-in{max-width:1180px;margin:0 auto;padding:2.4rem 1.4rem 1.8rem}
+.kicker{
+  font-family:var(--mono);font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--repere);display:flex;flex-wrap:wrap;gap:.4rem 1.2rem;margin-bottom:1.1rem
+}
+.kicker span{white-space:nowrap}
+h1{
+  font-family:var(--cond);font-weight:700;font-size:clamp(1.9rem,5.2vw,3.15rem);
+  line-height:1.06;letter-spacing:-.015em;margin:0 0 .7rem;max-width:20ch
+}
+.dek{font-size:1.03rem;color:var(--graphite);max-width:62ch;margin:0}
+.meta-strip{
+  display:flex;flex-wrap:wrap;gap:.35rem 1.6rem;margin-top:1.5rem;padding-top:1rem;
+  border-top:1px solid var(--trame);font-family:var(--mono);font-size:.72rem;color:var(--graphite)
+}
+.meta-strip b{color:var(--encre);font-weight:500}
+
+/* ---------- shell ---------- */
+.shell{max-width:1180px;margin:0 auto;padding:0 1.4rem;display:grid;grid-template-columns:1fr;gap:0}
+@media(min-width:1000px){
+  .shell{grid-template-columns:200px minmax(0,1fr);gap:3.4rem;padding-top:2.6rem}
+}
+.rail{display:none}
+@media(min-width:1000px){
+  .rail{display:block;position:sticky;top:1.6rem;align-self:start;max-height:calc(100vh - 3rem);overflow:auto}
+  .rail ol{list-style:none;margin:0;padding:0;font-family:var(--mono);font-size:.74rem;line-height:1.5}
+  .rail li{margin-bottom:.5rem}
+  .rail a{color:var(--graphite);text-decoration:none;display:block;border-left:2px solid var(--trame);padding-left:.6rem}
+  .rail a:hover{color:var(--repere);border-left-color:var(--repere)}
+  .rail .rail-t{font-family:var(--mono);font-size:.64rem;letter-spacing:.14em;text-transform:uppercase;color:var(--repere);margin-bottom:.8rem}
+}
+main{min-width:0;padding:2rem 0 4rem}
+
+/* ---------- sections ---------- */
+.sec{margin:0 0 3.4rem;scroll-margin-top:1rem}
+.sec > h2{
+  font-family:var(--cond);font-weight:700;font-size:clamp(1.35rem,3.4vw,1.85rem);
+  line-height:1.12;letter-spacing:-.01em;margin:.35rem 0 1rem;max-width:30ch
+}
+.eyebrow{
+  font-family:var(--mono);font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--repere);display:block;padding-bottom:.45rem;border-bottom:1px solid var(--trame)
+}
+h3{font-family:var(--cond);font-weight:600;font-size:1.12rem;letter-spacing:.005em;margin:2rem 0 .55rem}
+h4{font-family:var(--mono);font-weight:600;font-size:.8rem;letter-spacing:.06em;text-transform:uppercase;color:var(--graphite);margin:1.4rem 0 .4rem}
+p{margin:0 0 1rem;max-width:74ch}
+ul,ol{max-width:74ch;padding-left:1.15rem;margin:0 0 1rem}
+li{margin-bottom:.4rem}
+strong{font-weight:600}
+em{font-style:italic}
+code{font-family:var(--mono);font-size:.86em;background:#E7EAE7;padding:.1em .35em;border-radius:2px}
+a{color:var(--repere)}
+
+/* ---------- hero demo (signature) ---------- */
+.hero{margin:0 0 3.2rem}
+.hero-lab{font-family:var(--mono);font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--repere);margin-bottom:.8rem}
+.split{display:grid;grid-template-columns:1fr;gap:1.6rem}
+@media(min-width:760px){.split{grid-template-columns:1fr 1fr;gap:1.1rem}}
+.pane{position:relative;background:var(--blanc);border:1px solid var(--trame);padding:1.5rem 1.1rem 1.1rem}
+.pane::before,.pane::after{content:"";position:absolute;width:13px;height:13px;pointer-events:none}
+.pane::before{top:-1px;left:-1px;border-top:2px solid var(--repere);border-left:2px solid var(--repere)}
+.pane::after{bottom:-1px;right:-1px;border-bottom:2px solid var(--repere);border-right:2px solid var(--repere)}
+.pane-tag{
+  position:absolute;top:-1px;right:-1px;background:var(--repere);color:#fff;
+  font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;padding:.18rem .5rem
+}
+.pane.alt .pane-tag{background:var(--detect)}
+.pane.alt::before{border-color:var(--detect)}
+.pane.alt::after{border-color:var(--detect)}
+.pane-note{font-family:var(--mono);font-size:.66rem;color:var(--graphite);margin-top:.9rem;padding-top:.6rem;border-top:1px dotted var(--trame)}
+
+/* fac-similé RTL */
+.fax{direction:rtl;text-align:right;font-family:var(--naskh);font-size:.82rem;line-height:1.75;position:relative;overflow:hidden}
+.fax .wm{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  transform:rotate(-27deg);font-family:var(--mono);font-size:1.5rem;letter-spacing:.05em;
+  color:rgba(16,20,24,.11);pointer-events:none;white-space:nowrap;z-index:2
+}
+.fax-grid{display:grid;grid-template-columns:1fr 34px;gap:6px}
+.fax-marge{display:grid;grid-template-rows:repeat(5,1fr);gap:3px}
+.fax-marge div{border:1px solid #98A0A6;font-family:var(--mono);font-size:.5rem;display:flex;align-items:center;justify-content:center;color:var(--graphite);min-height:22px}
+.fax-head{display:grid;grid-template-columns:1.1fr .8fr 1fr;border:1px solid #98A0A6;margin-bottom:.7rem}
+.fax-head div{padding:.35rem .4rem;font-size:.72rem;border-left:1px solid #98A0A6}
+.fax-head div:last-child{border-left:0}
+.fax-t{width:100%;border-collapse:collapse;margin:.6rem 0}
+.fax-t th,.fax-t td{border:1px solid #98A0A6;padding:.4rem;font-size:.72rem;vertical-align:top}
+.fax-t th{font-weight:700;background:#F6F7F6}
+.jeton{
+  display:inline-flex;align-items:center;justify-content:center;
+  min-width:34px;height:20px;padding:0 .35rem;margin:2px;
+  border:1px solid #7A838A;border-radius:999px;font-size:.62rem;font-family:var(--ar)
+}
+.pointille{border-bottom:1px dotted #6E777E;display:block;height:1.05rem;margin:.28rem 0}
+.fax-q{margin:.45rem 0 .1rem;font-size:.74rem}
+.fax-lbl{font-family:var(--ar);font-weight:600}
+/* overlays de détection */
+.ovl{position:absolute;z-index:3;pointer-events:none}
+.ovl b{
+  position:absolute;top:-9px;right:0;font-family:var(--mono);font-weight:500;
+  font-size:.5rem;letter-spacing:.06em;text-transform:uppercase;color:#fff;padding:0 .25rem;white-space:nowrap
+}
+.ovl.c{border:1.5px dashed var(--repere)} .ovl.c b{background:var(--repere)}
+.ovl.m{border:1.5px dashed var(--detect)} .ovl.m b{background:var(--detect)}
+
+/* ---------- tables ---------- */
+.tw{overflow-x:auto;margin:1.2rem 0 1.5rem;border:1px solid var(--trame);background:var(--blanc)}
+table.d{border-collapse:collapse;width:100%;min-width:560px;font-family:var(--cond);font-size:.83rem}
+table.d th,table.d td{padding:.55rem .7rem;text-align:left;border-bottom:1px solid var(--trame);vertical-align:top}
+table.d thead th{
+  font-family:var(--mono);font-size:.63rem;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--graphite);background:#E9ECE9;border-bottom:1px solid var(--encre);font-weight:500;white-space:nowrap
+}
+table.d tbody tr:last-child td{border-bottom:0}
+table.d td.n,table.d th.n{font-family:var(--mono);font-size:.78rem;white-space:nowrap}
+.cap{font-family:var(--mono);font-size:.66rem;color:var(--graphite);margin:-.9rem 0 1.6rem}
+.ar-inline{font-family:var(--ar);direction:rtl;unicode-bidi:isolate}
+
+/* pastilles */
+.pill{font-family:var(--mono);font-size:.66rem;padding:.1rem .4rem;border:1px solid;border-radius:2px;white-space:nowrap;display:inline-block}
+.p-ok{color:#1E6B3A;border-color:#9CC3AB;background:#EDF5F0}
+.p-mid{color:var(--ambre);border-color:#D9C293;background:var(--ambre-bg)}
+.p-hard{color:var(--detect);border-color:#E0A6C4;background:#FBEDF4}
+
+/* ---------- barres ---------- */
+.bars{margin:1.2rem 0 .4rem;border:1px solid var(--trame);background:var(--blanc);padding:1.1rem}
+.bar-row{display:grid;grid-template-columns:88px 1fr 52px;gap:.6rem;align-items:center;margin-bottom:.5rem}
+.bar-row .lab{font-family:var(--mono);font-size:.7rem;text-align:right;color:var(--encre)}
+.bar-track{background:#E9ECE9;height:14px;position:relative}
+.bar-fill{height:100%;background:var(--repere)}
+.bar-fill.warn{background:var(--detect)}
+.bar-row .val{font-family:var(--mono);font-size:.7rem;color:var(--graphite)}
+
+/* ---------- encadrés ---------- */
+.box{border-left:3px solid var(--repere);background:var(--blanc);padding:1rem 1.1rem;margin:1.4rem 0;border-top:1px solid var(--trame);border-right:1px solid var(--trame);border-bottom:1px solid var(--trame)}
+.box p:last-child{margin-bottom:0}
+.box .bt{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--repere);display:block;margin-bottom:.4rem}
+.box.warn{border-left-color:var(--ambre);background:var(--ambre-bg)}
+.box.warn .bt{color:var(--ambre)}
+.box.key{border-left-color:var(--detect)}
+.box.key .bt{color:var(--detect)}
+
+/* ---------- code ---------- */
+pre{
+  background:#12181D;color:#D8E0E4;padding:1rem 1.1rem;overflow-x:auto;
+  font-family:var(--mono);font-size:.75rem;line-height:1.6;margin:1rem 0 1.5rem;border-radius:2px
+}
+pre .cm{color:#7C8F99}
+pre .kw{color:#6FC3D1}
+pre .st{color:#E39BC0}
+
+/* ---------- étapes ---------- */
+.steps{counter-reset:st;list-style:none;padding:0;margin:1.2rem 0}
+.steps > li{
+  counter-increment:st;position:relative;padding:0 0 1.2rem 3.1rem;margin:0;
+  border-left:1px solid var(--trame);margin-left:.9rem
+}
+.steps > li:last-child{border-left-color:transparent;padding-bottom:0}
+.steps > li::before{
+  content:counter(st,decimal-leading-zero);position:absolute;left:-.9rem;top:0;
+  width:1.8rem;height:1.8rem;background:var(--encre);color:#fff;border-radius:50%;
+  font-family:var(--mono);font-size:.66rem;display:flex;align-items:center;justify-content:center
+}
+.steps h4{margin-top:.15rem}
+
+footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem}
+.foot-in{max-width:1180px;margin:0 auto;padding:2rem 1.4rem 3rem;font-family:var(--mono);font-size:.7rem;color:var(--graphite)}
+.foot-in a{color:var(--repere);word-break:break-all}
+.srcs{columns:2;column-gap:2rem;margin-top:.8rem}
+@media(max-width:700px){.srcs{columns:1}}
+.srcs li{break-inside:avoid;margin-bottom:.35rem;font-size:.68rem;line-height:1.45}
+
+:focus-visible{outline:2px solid var(--detect);outline-offset:2px}
+@media(prefers-reduced-motion:no-preference){a{transition:color .15s}}
+@media print{
+  body{background:#fff;font-size:11pt}
+  .rail,.masthead{break-inside:avoid}
+  .rail{display:none}
+  .sec{break-inside:auto}
+  h2,h3{break-after:avoid}
+  pre{background:#f4f4f4;color:#111;border:1px solid #ccc}
+  .shell{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-in">
+    <div class="kicker">
+      <span>Étude technique &amp; faisabilité</span>
+      <span>OCR arabe · RTL · tableaux · figures</span>
+      <span>Application mobile</span>
+      <span>Août 2026</span>
+    </div>
+    <h1>Reproduire un sujet d'examen arabe, à l'identique, depuis un téléphone</h1>
+    <p class="dek">Ce que la chaîne technique peut réellement faire en 2026 sur des documents scolaires en arabe contenant tableaux, pictogrammes, chiffres et filigranes — et ce qu'elle ne fera pas. Analyse des moteurs, du pipeline, de l'architecture mobile, des coûts, des risques et du cadre juridique.</p>
+    <div class="meta-strip">
+      <span>Documents analysés : <b>2 évaluations de mathématiques, 4<sup>e</sup> année primaire (Tunisie)</b></span>
+      <span>Verdict : <b>faisable en hybride, pas en 100 % automatique</b></span>
+      <span>Effort MVP : <b>56–74 j·h</b></span>
+    </div>
+  </div>
+</header>
+
+<div class="shell">
+
+<nav class="rail" aria-label="Sommaire">
+  <div class="rail-t">Sommaire</div>
+  <ol>
+    <li><a href="#s0">Résumé exécutif</a></li>
+    <li><a href="#s1">01 · Anatomie des documents</a></li>
+    <li><a href="#s2">02 · Reconnaître ≠ reproduire</a></li>
+    <li><a href="#s3">03 · État de l'art OCR arabe</a></li>
+    <li><a href="#s4">04 · Le pipeline, étage par étage</a></li>
+    <li><a href="#s5">05 · Le filigrane en détail</a></li>
+    <li><a href="#s6">06 · Mobile : embarqué ou serveur</a></li>
+    <li><a href="#s7">07 · Stack recommandée</a></li>
+    <li><a href="#s8">08 · Modèle de coûts</a></li>
+    <li><a href="#s9">09 · Matrice de faisabilité</a></li>
+    <li><a href="#s10">10 · Qualité &amp; métriques</a></li>
+    <li><a href="#s11">11 · Feuille de route</a></li>
+    <li><a href="#s12">12 · Cadre juridique</a></li>
+    <li><a href="#s13">13 · Repositionnements</a></li>
+    <li><a href="#s14">14 · Annexes techniques</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<!-- ======================= HERO DEMO ======================= -->
+<section class="hero" aria-label="Démonstration du principe">
+  <div class="hero-lab">Le principe, en une image · source détectée → document reconstruit</div>
+  <div class="split">
+
+    <div class="pane alt">
+      <span class="pane-tag">01 · page source</span>
+      <div class="fax" style="min-height:300px">
+        <div class="wm">medrassatouna.com</div>
+
+        <div class="ovl m" style="top:8px;left:6px;right:6px;height:38px"><b>filigrane</b></div>
+        <div class="ovl c" style="top:52px;left:44px;right:6px;height:44px"><b>en-tête tabulaire</b></div>
+        <div class="ovl c" style="top:6px;left:6px;width:34px;height:290px"><b>marge notation</b></div>
+        <div class="ovl c" style="top:128px;left:44px;right:6px;height:96px"><b>tableau + jetons</b></div>
+
+        <div class="fax-grid">
+          <div>
+            <div class="fax-head">
+              <div>المدرسة الابتدائية</div>
+              <div>العدد : ......</div>
+              <div>السنة الرابعة</div>
+            </div>
+            <p class="fax-q" style="margin-bottom:.4rem">الاسم و اللقب : ..............................</p>
+            <p class="fax-q"><span class="fax-lbl">السند 1 :</span> جمّع فريق الفراشات المبلغ المبيّن في الجدول التالي.</p>
+            <table class="fax-t">
+              <tr><th>فريق الفراشات</th><th>فريق الأسود</th></tr>
+              <tr>
+                <td>
+                  <span class="jeton">30 د</span><span class="jeton">1 د</span><span class="jeton">5 د</span>
+                  <span class="jeton">100</span><span class="jeton">50</span><span class="jeton">½ د</span>
+                  <span class="jeton">10 د</span><span class="jeton">5 د</span>
+                </td>
+                <td style="font-weight:700">43500 مي</td>
+              </tr>
+            </table>
+            <p class="fax-q"><span class="fax-lbl">التعليمة 1 :</span> أحسب المبلغ الذي جمعه فريق الفراشات.</p>
+            <span class="pointille"></span><span class="pointille"></span>
+          </div>
+          <div class="fax-marge">
+            <div>د</div><div>د</div><div>د</div><div>د</div><div>د</div>
+          </div>
+        </div>
+      </div>
+      <div class="pane-note">Ce que voit le moteur : 6 régions hétérogènes, un flux RTL, des chiffres en écriture occidentale, des pictogrammes qui ne sont pas du texte, et une surcouche translucide qui traverse tout.</div>
+    </div>
+
+    <div class="pane">
+      <span class="pane-tag">02 · reconstruction</span>
+      <div class="fax" style="min-height:300px">
+        <div class="fax-grid">
+          <div>
+            <div class="fax-head">
+              <div>المدرسة الابتدائية</div>
+              <div>العدد : ......</div>
+              <div>السنة الرابعة</div>
+            </div>
+            <p class="fax-q" style="margin-bottom:.4rem">الاسم و اللقب : ..............................</p>
+            <p class="fax-q"><span class="fax-lbl">السند 1 :</span> جمّع فريق الفراشات المبلغ المبيّن في الجدول التالي.</p>
+            <table class="fax-t">
+              <tr><th>فريق الفراشات</th><th>فريق الأسود</th></tr>
+              <tr>
+                <td>
+                  <span class="jeton">30 د</span><span class="jeton">1 د</span><span class="jeton">5 د</span>
+                  <span class="jeton">100</span><span class="jeton">50</span><span class="jeton">½ د</span>
+                  <span class="jeton">10 د</span><span class="jeton">5 د</span>
+                </td>
+                <td style="font-weight:700">43500 مي</td>
+              </tr>
+            </table>
+            <p class="fax-q"><span class="fax-lbl">التعليمة 1 :</span> أحسب المبلغ الذي جمعه فريق الفراشات.</p>
+            <span class="pointille"></span><span class="pointille"></span>
+          </div>
+          <div class="fax-marge">
+            <div>د</div><div>د</div><div>د</div><div>د</div><div>د</div>
+          </div>
+        </div>
+      </div>
+      <div class="pane-note">Le panneau de droite est du HTML/CSS pur, généré depuis un JSON de structure. Aucun pixel de la source n'a été copié — le filigrane n'a donc pas été « effacé », il n'a jamais existé. C'est toute la thèse de ce rapport.</div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ======================= 00 RÉSUMÉ ======================= -->
+<section class="sec" id="s0">
+  <span class="eyebrow">§ 00 — Résumé exécutif</span>
+  <h2>Le projet tient debout, mais pas sous la forme où il est habituellement posé</h2>
+
+  <p>La demande telle qu'elle est formulée — « OCR qui supprime le filigrane et reste fidèle à 100 % » — mélange trois problèmes de difficulté très différente. Séparés, deux sont résolus et un ne l'est pas.</p>
+
+  <ul>
+    <li><strong>Lire l'arabe imprimé propre</strong> : résolu. Les meilleurs moteurs 2026 descendent sous 5 % de taux d'erreur caractère sur ce type de page.</li>
+    <li><strong>Faire disparaître le filigrane</strong> : résolu, et bien plus facilement qu'on ne le croit — à condition de ne pas s'attaquer au filigrane.</li>
+    <li><strong>La fidélité « 100 % »</strong> : impossible au sens strict, et ce n'est pas une limite des modèles. Dès que vous re-composez le texte avec une police différente de l'originale, la restitution pixel-à-pixel est perdue par construction. Ce qui est atteignable, et suffisant, c'est la <em>fidélité structurelle</em> : même contenu, même ordre, mêmes valeurs numériques, même découpage en blocs, rendu propre et éditable.</li>
+  </ul>
+
+  <div class="box key">
+    <span class="bt">Recommandation centrale</span>
+    <p>Ne construisez pas un « effaceur de filigrane ». Construisez un <strong>reconstructeur de documents</strong> : page → analyse de mise en page → JSON structuré → rendu HTML/PDF/DOCX. Le filigrane disparaît gratuitement parce qu'il ne fait pas partie de la structure. Vous gagnez en prime l'éditabilité, qui vaut bien plus que la copie.</p>
+  </div>
+
+  <h4>Les cinq chiffres à retenir</h4>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Indicateur</th><th class="n">Valeur réaliste</th><th>Commentaire</th></tr></thead>
+      <tbody>
+        <tr><td>Taux d'erreur caractère (arabe imprimé, page propre)</td><td class="n">2 – 8 %</td><td>Selon le moteur ; Tesseract est hors-jeu à ~54 %</td></tr>
+        <tr><td>Pages traitées sans aucune retouche humaine</td><td class="n">15 – 35 %</td><td>Le reste demande une relecture ciblée</td></tr>
+        <tr><td>Temps de relecture par page</td><td class="n">30 – 90 s</td><td>C'est là que se joue la viabilité du produit</td></tr>
+        <tr><td>Coût API par page (chaîne à deux étages)</td><td class="n">0,005 – 0,010 €</td><td>≈ 5–10 € pour 1 000 pages</td></tr>
+        <tr><td>Effort MVP (serveur + app + éditeur)</td><td class="n">56 – 74 j·h</td><td>3 à 4 mois à mi-temps pour un développeur seul</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>Architecture recommandée : hybride.</strong> Capture, redressement, éditeur et rendu sur le téléphone ; analyse de mise en page et reconnaissance côté serveur. Le tout-embarqué est aujourd'hui un piège sur Android, pour une raison précise développée au § 06 : le kit OCR natif d'Android ne reconnaît pas l'arabe.</p>
+</section>
+
+<!-- ======================= 01 ANATOMIE ======================= -->
+<section class="sec" id="s1">
+  <span class="eyebrow">§ 01 — Anatomie des documents cibles</span>
+  <h2>Onze objets sur une page, et un seul est du texte ordinaire</h2>
+
+  <p>Les deux évaluations fournies sont représentatives du corpus scolaire tunisien : format A4 portrait, arabe non vocalisé, mathématiques de 4<sup>e</sup> année primaire, mise en page en tableaux, monnaie représentée par des pictogrammes. C'est un cas <em>difficile</em> — plus difficile qu'un livre ou qu'un article de presse — et il faut le dire d'emblée, parce que la plupart des benchmarks publics ne mesurent pas ce type de page.</p>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Élément observé</th><th>Nature</th><th class="n">Difficulté</th><th>Piège spécifique</th></tr></thead>
+      <tbody>
+        <tr><td>En-tête à 3 cellules (école / n° / classe)</td><td>Tableau simple</td><td class="n"><span class="pill p-ok">faible</span></td><td>Cellules souvent vides → lignes fantômes</td></tr>
+        <tr><td>Corps de texte arabe RTL non vocalisé</td><td>Texte</td><td class="n"><span class="pill p-ok">faible</span></td><td>Aucun si le moteur est bien choisi</td></tr>
+        <tr><td>Nombres en chiffres occidentaux (43500, 27250, 8500)</td><td>Texte mixte</td><td class="n"><span class="pill p-hard">élevée</span></td><td><strong>Inversion bidirectionnelle</strong> — voir encadré ci-dessous</td></tr>
+        <tr><td>Colonne de notation en marge (petites cases « د »)</td><td>Tableau vertical</td><td class="n"><span class="pill p-mid">moyenne</span></td><td>Fusionnée avec le corps par les moteurs naïfs → ordre de lecture détruit</td></tr>
+        <tr><td>Tableau à 2 colonnes bordé (فريق الفراشات / فريق الأسود)</td><td>Tableau</td><td class="n"><span class="pill p-mid">moyenne</span></td><td>Cellule contenant des figures, pas du texte</td></tr>
+        <tr><td>Jetons monétaires (ovales : 30 د, 100, ½ د…)</td><td>Figure vectorielle + texte</td><td class="n"><span class="pill p-hard">élevée</span></td><td>Ni texte ni image : objets graphiques porteurs de sens</td></tr>
+        <tr><td>Fractions (½ د, 1/2 د)</td><td>Notation math</td><td class="n"><span class="pill p-hard">élevée</span></td><td>Rendues « 12 » ou « 1 2 » par la plupart des OCR</td></tr>
+        <tr><td>Lignes pointillées de réponse</td><td>Structure</td><td class="n"><span class="pill p-ok">faible</span></td><td>Systématiquement perdues en sortie Markdown</td></tr>
+        <tr><td>Cadre bleu (zone de réponse encadrée)</td><td>Structure</td><td class="n"><span class="pill p-mid">moyenne</span></td><td>Confondu avec un tableau à une cellule</td></tr>
+        <tr><td>Filigrane diagonal translucide</td><td>Surcouche</td><td class="n"><span class="pill p-ok">faible</span></td><td>Facile sur fond blanc, pénible sur le logo</td></tr>
+        <tr><td>Logo / bandeau d'en-tête</td><td>Image</td><td class="n"><span class="pill p-mid">moyenne</span></td><td>À remplacer, pas à reproduire</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Inventaire dressé sur les deux pages fournies. Un corpus élargi ajoutera : figures géométriques, horloges, droites graduées, tableaux à cellules fusionnées, écritures manuscrites de correction.</p>
+
+  <div class="box warn">
+    <span class="bt">Le piège n° 1 : la bidirectionnalité</span>
+    <p>Dans une phrase arabe, un nombre comme <span class="ar-inline">27250 مي</span> s'écrit de gauche à droite <em>à l'intérieur</em> d'un flux qui va de droite à gauche. L'algorithme BiDi d'Unicode gère cela — mais uniquement si le texte extrait est stocké en <strong>ordre logique</strong>, jamais en ordre visuel.</p>
+    <p>Or beaucoup de moteurs OCR restituent l'ordre visuel, ligne par ligne, de gauche à droite. Résultat courant : <code>27250</code> devient <code>05272</code>, ou le nombre se retrouve accolé au mauvais mot. Sur un manuel d'histoire, c'est une coquille. <strong>Sur un sujet de mathématiques, c'est une erreur fatale</strong> : l'exercice devient faux et l'utilisateur perd toute confiance dans l'outil.</p>
+    <p>Conséquence produit : les nombres doivent faire l'objet d'un contrôle dédié, pas d'un contrôle statistique global. Voir § 10.</p>
+  </div>
+</section>
+
+<!-- ======================= 02 RECONNAÎTRE ≠ REPRODUIRE ======================= -->
+<section class="sec" id="s2">
+  <span class="eyebrow">§ 02 — Le vrai problème</span>
+  <h2>Trois stratégies possibles, une seule tient la route</h2>
+
+  <p>« Fidèle à 100 % » peut vouloir dire trois choses radicalement différentes, qui appellent trois architectures différentes. Choisir la mauvaise coûte plusieurs mois.</p>
+
+  <ol class="steps">
+    <li>
+      <h4>Stratégie A — Pixel</h4>
+      <p>On garde l'image d'origine et on efface le filigrane par inpainting. La page reste un raster.</p>
+      <p><strong>Fidélité visuelle</strong> quasi parfaite. <strong>Éditabilité</strong> nulle. <strong>Poids</strong> lourd. <strong>Risque juridique</strong> maximal : le produit fini est, littéralement, la page de quelqu'un d'autre moins sa signature. C'est aussi la version qui déclenche des refus en revue App Store.</p>
+    </li>
+    <li>
+      <h4>Stratégie B — Hybride par découpe</h4>
+      <p>Le texte est reconnu et re-composé ; les zones graphiques (jetons, figures, schémas) sont découpées de l'image source et réinsérées comme images.</p>
+      <p>Excellent compromis <em>technique</em> — c'est le mode de repli à conserver pour les blocs à faible confiance. Mais les découpes portent encore les pixels d'origine, donc éventuellement des fragments de filigrane, et le résultat reste semi-éditable.</p>
+    </li>
+    <li>
+      <h4>Stratégie C — Reconstruction sémantique <span class="pill p-ok">recommandée</span></h4>
+      <p>La page est convertie en une représentation intermédiaire structurée (JSON) : blocs, rôles, coordonnées, texte, tableaux, jetons typés. Puis <em>re-rendue</em> depuis zéro dans un moteur de composition.</p>
+      <p>La fidélité perçue plafonne vers 90–98 % selon la complexité, mais le document devient modifiable, réutilisable, exportable en plusieurs formats, indexable, et générable en variantes. Le filigrane n'est pas supprimé : il n'est jamais transféré.</p>
+    </li>
+  </ol>
+
+  <div class="box">
+    <span class="bt">Reformulation utile</span>
+    <p>Le produit n'est pas « une photocopieuse qui enlève les tampons ». C'est un <strong>convertisseur de sujet-papier en sujet-données</strong>. Une fois la page en JSON, tout devient possible : changer les nombres, générer 30 variantes d'un même exercice, produire un corrigé, alimenter une banque de questions, exporter en DOCX pour un collègue. Le PDF fidèle n'est plus que l'une des sorties.</p>
+  </div>
+</section>
+
+<!-- ======================= 03 ÉTAT DE L'ART ======================= -->
+<section class="sec" id="s3">
+  <span class="eyebrow">§ 03 — État de l'art OCR arabe, mi-2026</span>
+  <h2>Les moteurs classiques sont hors-jeu ; le champ appartient aux modèles vision-langage</h2>
+
+  <p>L'arabe cumule trois difficultés que les architectures OCR classiques gèrent mal : écriture cursive avec formes contextuelles des lettres, sens de lecture droite-gauche, et diacritiques optionnels. Le benchmark de référence publié à l'ACL 2025, <strong>KITAB-Bench</strong> (8 809 échantillons, 9 domaines, métriques dédiées CER / TEDS / MARS / SCRM), donne un classement sans appel.</p>
+
+  <div class="bars" role="img" aria-label="Taux d'erreur caractère sur KITAB-Bench">
+    <div style="font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--graphite);margin-bottom:.8rem">Taux d'erreur caractère (CER) — plus bas = meilleur</div>
+    <div class="bar-row"><span class="lab">Gemini 2.0</span><span class="bar-track"><span class="bar-fill" style="width:22%"></span></span><span class="val">13,0 %</span></div>
+    <div class="bar-row"><span class="lab">GPT-4o</span><span class="bar-track"><span class="bar-fill" style="width:53%"></span></span><span class="val">31,0 %</span></div>
+    <div class="bar-row"><span class="lab">Qwen 2.5</span><span class="bar-track"><span class="bar-fill warn" style="width:85%"></span></span><span class="val">49,2 %</span></div>
+    <div class="bar-row"><span class="lab">Tesseract</span><span class="bar-track"><span class="bar-fill warn" style="width:93%"></span></span><span class="val">54,0 %</span></div>
+    <div class="bar-row"><span class="lab">EasyOCR</span><span class="bar-track"><span class="bar-fill warn" style="width:100%"></span></span><span class="val">58,0 %</span></div>
+  </div>
+  <p class="cap">Source : KITAB-Bench, MBZUAI Oryx, ACL 2025. Sur la reconnaissance de tableaux (TEDS, plus haut = meilleur) : GPT-4o 85,7 % · Gemini 2.0 83,0 % · Qwen 2.5 59,3 % · EasyOCR 49,1 % · <strong>Tesseract 28,2 %</strong>.</p>
+
+  <div class="box warn">
+    <span class="bt">Conclusion opérationnelle</span>
+    <p>Tesseract, y compris avec le pack de langue arabe, produit plus d'une erreur pour deux caractères sur ce type de document et s'effondre complètement sur les tableaux. <strong>Ne construisez rien dessus.</strong> C'est le principal piège des tutoriels disponibles en ligne, qui datent quasiment tous d'avant 2024.</p>
+  </div>
+
+  <h3>Les moteurs à considérer réellement</h3>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Moteur</th><th>Type</th><th>Arabe</th><th>Tableaux</th><th class="n">Coût</th><th>À retenir</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Mistral OCR 4</strong></td><td>API dédiée</td><td>oui (170 langues)</td><td>HTML avec colspan/rowspan</td><td class="n">4 $ / 1 000 p.<br>2 $ en batch</td>
+          <td>Sorti le 23 juin 2026. Boîtes englobantes au paragraphe, scores de confiance, classification de blocs. Le meilleur rapport qualité/prix/effort pour démarrer.</td>
+        </tr>
+        <tr>
+          <td><strong>Gemini 3.x Flash</strong></td><td>VLM généraliste</td><td>très bon</td><td>bon</td><td class="n">variable, ≈ 6–30 $ / 1 000 p.</td>
+          <td>Le seul à pouvoir sortir directement un JSON <em>sémantique</em> (rôles, types d'exercice, jetons typés) en un appel. Coûteux en jetons de sortie.</td>
+        </tr>
+        <tr>
+          <td><strong>Google Document AI</strong></td><td>API dédiée</td><td>oui</td><td>oui</td><td class="n">≈ 5 $ / 1 000 p.</td>
+          <td>Solide et éprouvé sur l'arabe dans la littérature académique. Intégration GCP.</td>
+        </tr>
+        <tr>
+          <td><strong>Qari-OCR</strong> (v0.2 / v0.3 / 0.4)</td><td>VLM spécialisé arabe, ouvert</td><td>excellent</td><td>v0.3 : balises HTML</td><td class="n">auto-hébergé</td>
+          <td>Dérivé de Qwen2-VL-2B. WER 0,160 / CER 0,061 sur textes fortement vocalisés — au-dessus de Mistral OCR sur ce segment. v0.3 vise la structure, 0.4 les ouvrages et manuscrits.</td>
+        </tr>
+        <tr>
+          <td><strong>PaddleOCR-VL</strong></td><td>VLM compact ouvert</td><td>bon</td><td>bon</td><td class="n">auto-hébergé</td>
+          <td>0,9 milliard de paramètres, 109 langues. Testé sur page arabe : ~2,5–3,3 Go de VRAM et ~19 s/page via <code>transformers</code> avec FlashAttention-2 — bien plus rapide sous vLLM. Fidélité des diacritiques inégale.</td>
+        </tr>
+        <tr>
+          <td><strong>dots.ocr</strong></td><td>VLM multi-écritures, MIT</td><td>très bon</td><td>très bon</td><td class="n">auto-hébergé</td>
+          <td>1,7 Md de paramètres, conçu pour les écritures peu dotées. Meilleures métriques textuelles brutes que Baseer sur benchmark arabe (WER 0,39 / CER 0,28).</td>
+        </tr>
+        <tr>
+          <td><strong>Baseer</strong></td><td>VLM arabe → Markdown</td><td>excellent</td><td>meilleure structure</td><td class="n">auto-hébergé</td>
+          <td>Qwen2.5-VL-3B affiné sur 500 000 documents arabes. WER 0,25 et TEDS 66 sur Misraj-DocOCR : le plus fidèle à la <em>mise en page</em>.</td>
+        </tr>
+        <tr>
+          <td><strong>Apple Vision</strong></td><td>Embarqué iOS/macOS</td><td>oui (+ najdi)</td><td>natif depuis iOS 26</td><td class="n">gratuit</td>
+          <td><code>RecognizeDocumentsRequest</code> : 26 langues, détection de tableaux, listes et paragraphes, 100 % sur l'appareil. Sous-estimé.</td>
+        </tr>
+        <tr>
+          <td><strong>ML Kit (Android)</strong></td><td>Embarqué</td><td><span class="pill p-hard">non</span></td><td>non</td><td class="n">gratuit</td>
+          <td>Text Recognition v2 couvre latin, chinois, devanagari, japonais, coréen. <strong>Pas d'arabe.</strong> Bloquant pour tout scénario Android hors-ligne.</td>
+        </tr>
+        <tr>
+          <td><strong>AWS Textract</strong></td><td>API dédiée</td><td><span class="pill p-hard">non</span></td><td>oui</td><td class="n">—</td>
+          <td>Anglais, espagnol, allemand, français, italien, portugais uniquement. À écarter.</td>
+        </tr>
+        <tr>
+          <td><strong>Tesseract / EasyOCR</strong></td><td>Classique</td><td>médiocre</td><td>très mauvais</td><td class="n">gratuit</td>
+          <td>Voir le graphique ci-dessus. Utile seulement comme détecteur de lignes de secours.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Les tarifs et les versions évoluent vite : Mistral OCR est passé de 2 à 4 $/1 000 pages entre les versions 3 et 4, Gemini a réorganisé sa grille en mai 2026. À revérifier avant tout engagement.</p>
+
+  <p>Un détail qui compte pour un usage francophone : <strong>Adobe Acrobat ne fait toujours pas d'OCR arabe</strong>. Beaucoup d'utilisateurs enseignants l'ignorent — c'est un argument commercial en soi.</p>
+</section>
+
+<!-- ======================= 04 PIPELINE ======================= -->
+<section class="sec" id="s4">
+  <span class="eyebrow">§ 04 — Le pipeline</span>
+  <h2>Huit étages, dont trois font toute la différence</h2>
+
+  <ol class="steps">
+    <li>
+      <h4>Acquisition et normalisation</h4>
+      <p>Détection des bords de page, correction de perspective (dewarping), redressement (deskew), correction d'éclairage local, mise à l'échelle vers ~300 DPI équivalent, binarisation adaptative.</p>
+      <p>Étage bon marché et très rentable : la littérature attribue à la seule réduction de bruit jusqu'à 15 points d'exactitude sur fond dégradé, et une page inclinée de 5° perd déjà 10–15 %. Outils : OpenCV, Leptonica, ou les API natives de capture documentaire (<code>VNDocumentCameraViewController</code> sur iOS).</p>
+    </li>
+    <li>
+      <h4>Neutralisation du filigrane <span class="pill p-ok">facile ici</span></h4>
+      <p>Voir § 05. Sur ces documents, une séparation par luminance suffit dans plus de 95 % des cas.</p>
+    </li>
+    <li>
+      <h4>Analyse de mise en page</h4>
+      <p>Segmentation en régions typées : en-tête, marge de notation, bloc de consigne, tableau, figure, ligne de réponse, pied de page. C'est l'étage le plus déterminant pour la fidélité, et celui qu'on saute le plus souvent.</p>
+      <p>Point critique propre à ces documents : <strong>la colonne de notation en marge doit être isolée avant l'OCR</strong>, sinon l'ordre de lecture est irrémédiablement mélangé. Un simple détecteur de colonnes verticales étroites en bordure suffit à régler 90 % des cas.</p>
+    </li>
+    <li>
+      <h4>Reconnaissance du texte arabe</h4>
+      <p>Région par région, pas page entière : on gagne en précision et on garde la maîtrise de l'ordre. Sortie obligatoirement en <strong>ordre logique Unicode</strong>, jamais visuel. Marquage explicite des séquences numériques avec <code>U+2067</code>/<code>U+2069</code> (isolats directionnels) plutôt qu'avec les anciens <em>embeddings</em>.</p>
+    </li>
+    <li>
+      <h4>Tableaux</h4>
+      <p>Deux voies : détection de structure par lignes (Hough / morphologie) quand les bordures sont pleines, ce qui est le cas ici ; ou reconnaissance de structure par modèle quand elles ne le sont pas. Sortie en HTML avec <code>colspan</code>/<code>rowspan</code>, puis normalisation RTL — attention, l'ordre des colonnes doit être inversé au rendu, pas au stockage.</p>
+    </li>
+    <li>
+      <h4>Figures, pictogrammes et formules <span class="pill p-hard">l'étage difficile</span></h4>
+      <p>Les jetons monétaires ne sont ni du texte ni des images décoratives : ce sont des <em>objets métier</em>. La bonne approche est de les typer :</p>
+      <pre><span class="cm">// Un jeton reconnu, pas un pixel copié</span>
+{ <span class="st">"type"</span>: <span class="st">"jeton_monetaire"</span>, <span class="st">"forme"</span>: <span class="st">"ovale"</span>,
+  <span class="st">"valeur"</span>: 0.5, <span class="st">"unite"</span>: <span class="st">"DT"</span>, <span class="st">"libelle"</span>: <span class="st">"½ د"</span>,
+  <span class="st">"bbox"</span>: [412, 288, 448, 308], <span class="st">"confiance"</span>: 0.87 }</pre>
+      <p>Une fois typés, ils se redessinent parfaitement en CSS ou en SVG, se comptent, se somment, et se régénèrent avec d'autres valeurs. Pour les formules mathématiques, <code>pix2text</code> ou <code>texify</code> convertissent en LaTeX ; en contexte arabe mixte, prévoir un post-traitement dédié.</p>
+      <p>Repli obligatoire : si la confiance est sous le seuil, on découpe la zone de l'image nettoyée et on l'insère telle quelle. Mieux vaut une image correcte qu'une reconstruction fausse.</p>
+    </li>
+    <li>
+      <h4>Assemblage en représentation intermédiaire</h4>
+      <p>Un seul JSON par page, versionné, contenant l'arbre complet avec coordonnées et confiances. C'est <strong>l'actif du produit</strong> : le format de rendu, lui, est jetable.</p>
+    </li>
+    <li>
+      <h4>Rendu et contrôle qualité</h4>
+      <p>Rendu HTML/CSS puis impression PDF par un moteur de navigateur (voir § 07 : c'est le seul chemin fiable en RTL). Contrôle automatique par comparaison structurelle avec la source : SSIM sur les blocs, F1 sur les régions détectées, et vérification exhaustive des nombres.</p>
+    </li>
+  </ol>
+</section>
+
+<!-- ======================= 05 FILIGRANE ======================= -->
+<section class="sec" id="s5">
+  <span class="eyebrow">§ 05 — Le filigrane</span>
+  <h2>Le problème le plus visible est aussi le plus facile</h2>
+
+  <p>Sur les deux documents fournis, on trouve deux formes distinctes : une <strong>surcouche diagonale translucide</strong> en gris clair, et une <strong>ligne d'URL en pied de page</strong>. La seconde n'est pas un filigrane au sens technique, c'est du texte : il suffit de ne pas le transférer.</p>
+
+  <p>Pour la première, la structure de l'image joue en votre faveur de façon presque caricaturale. Sur une page scolaire, l'histogramme des niveaux de gris est trimodal et très séparé :</p>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Contenu</th><th class="n">Niveau de gris typique</th><th>Traitement</th></tr></thead>
+      <tbody>
+        <tr><td>Texte et traits noirs</td><td class="n">0 – 70</td><td>À conserver</td></tr>
+        <tr><td>Filigrane translucide</td><td class="n">170 – 230</td><td>À écraser vers le blanc</td></tr>
+        <tr><td>Papier</td><td class="n">240 – 255</td><td>Déjà blanc</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Un seuillage bien réglé fait donc l'essentiel du travail — à une nuance près, importante : <strong>là où le filigrane croise du texte noir</strong>, les pixels sont assombris par multiplication et survivent au seuil. On obtient un léger halo résiduel autour des lettres traversées. Trois réponses, par coût croissant :</p>
+
+  <h4>Niveau 1 — Séparation par luminance</h4>
+  <p>Instantané, sans modèle, sans GPU. Suffit pour la préparation à l'OCR dans plus de 95 % des cas. Voir le code en annexe A.</p>
+
+  <h4>Niveau 2 — Masque + inpainting classique</h4>
+  <p>On estime le masque du filigrane (par corrélation de motif si le filigrane est constant sur tout un site, ce qui est presque toujours le cas), on le dilate légèrement, puis on reconstruit avec <code>cv2.inpaint</code> (Telea ou Navier-Stokes). Efficace sur les croisements avec les logos.</p>
+
+  <h4>Niveau 3 — Inpainting neuronal</h4>
+  <p>Modèles de type LaMa ou transformeurs à masque, voire diffusion guidée. Nécessaire uniquement pour les filigranes de grande surface sur fonds texturés. <strong>Hors sujet ici</strong> : c'est du canon pour un moineau, et cela apporte une dépendance GPU coûteuse.</p>
+
+  <div class="box key">
+    <span class="bt">Niveau 0 — celui qu'il faut choisir</span>
+    <p>Si vous passez par la reconstruction (stratégie C), le problème du filigrane <strong>ne se pose plus du tout</strong>. Vous ne nettoyez la page que pour améliorer la lecture du moteur OCR, pas pour produire le résultat final. Le niveau 1 suffit, définitivement, et vous économisez tout un sous-projet.</p>
+  </div>
+</section>
+
+<!-- ======================= 06 MOBILE ======================= -->
+<section class="sec" id="s6">
+  <span class="eyebrow">§ 06 — Architecture mobile</span>
+  <h2>Embarqué, serveur, ou les deux : la réponse dépend d'Android</h2>
+
+  <p>C'est la question posée dans la demande initiale — « avec ou sans partie serveur » — et elle a une réponse nette, qui tient à une contrainte de plateforme rarement anticipée.</p>
+
+  <div class="box warn">
+    <span class="bt">La contrainte structurante</span>
+    <p><strong>Google ML Kit Text Recognition v2 ne reconnaît pas l'arabe.</strong> Il couvre le latin, le chinois, le devanagari, le japonais et le coréen — environ 38 Mo par écriture. Il n'existe donc pas, sur Android, d'équivalent gratuit et natif de ce qu'Apple fournit avec Vision.</p>
+    <p>Côté iOS en revanche, <code>VNRecognizeTextRequest</code> reconnaît l'arabe (et l'arabe najdi), et <code>RecognizeDocumentsRequest</code>, introduit avec iOS 26, détecte nativement tableaux, listes et paragraphes en 26 langues, entièrement sur l'appareil.</p>
+  </div>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Critère</th><th>Tout embarqué</th><th>Tout serveur</th><th>Hybride <span class="pill p-ok">reco.</span></th></tr></thead>
+      <tbody>
+        <tr><td>Qualité arabe (CER)</td><td>iOS ~5–10 % · Android : rien de natif</td><td>2–8 %</td><td>2–8 %, repli iOS hors-ligne</td></tr>
+        <tr><td>Tableaux</td><td>iOS 26 seulement</td><td>bon à très bon</td><td>très bon</td></tr>
+        <tr><td>Coût marginal par page</td><td class="n">0 €</td><td class="n">0,005–0,010 €</td><td class="n">0,005–0,010 €</td></tr>
+        <tr><td>Latence</td><td>1–4 s (OCR) · 15–60 s (VLM local)</td><td>3–8 s réseau compris</td><td>3–8 s</td></tr>
+        <tr><td>Hors-ligne</td><td>total</td><td>aucun</td><td>partiel (iOS)</td></tr>
+        <tr><td>Confidentialité</td><td>maximale</td><td>documents transitent</td><td>documents transitent</td></tr>
+        <tr><td>Poids de l'app</td><td>+ 300 Mo à 2,5 Go si VLM embarqué</td><td>léger</td><td>léger à moyen</td></tr>
+        <tr><td>Effort de développement</td><td>élevé, et double (iOS ≠ Android)</td><td>modéré</td><td>modéré</td></tr>
+        <tr><td>Délai de mise sur le marché</td><td class="n">lent</td><td class="n">rapide</td><td class="n">rapide</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Et un modèle vision-langage embarqué ?</h3>
+  <p>C'est techniquement possible en 2026 : des modèles comme Gemma 3n E2B ou les petits Qwen-VL tournent en INT4 sur un téléphone haut de gamme via LiteRT-LM, llama.cpp ou MLX. Mais les ordres de grandeur restent défavorables : les repères publiés donnent environ 7,6 jetons/s en décodage sur une carte à 8 Go — soit une dizaine de secondes pour une centaine de jetons. Une page d'examen structurée en demande plusieurs milliers.</p>
+  <p>Traduction : <strong>plusieurs minutes par page</strong>, avec échauffement thermique et batterie. C'est un chantier de V3, pas de MVP.</p>
+
+  <div class="box">
+    <span class="bt">Décision</span>
+    <p><strong>Hybride</strong>, avec une répartition claire : sur l'appareil, la capture, le redressement, le nettoyage, l'éditeur de correction et le rendu final ; sur le serveur, l'analyse de mise en page et la reconnaissance. Sur iOS uniquement, un mode dégradé hors-ligne via Vision, positionné comme un bonus et non comme la promesse principale.</p>
+  </div>
+</section>
+
+<!-- ======================= 07 STACK ======================= -->
+<section class="sec" id="s7">
+  <span class="eyebrow">§ 07 — Stack technique</span>
+  <h2>Ce qu'il faut choisir, et le seul choix vraiment contraint</h2>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Couche</th><th>Recommandation</th><th>Alternatives</th><th>Justification</th></tr></thead>
+      <tbody>
+        <tr><td>Application</td><td>Flutter</td><td>React Native · .NET MAUI · natif</td><td>Codebase unique, bons greffons caméra et détection de bords, rendu RTL correct. MAUI se défend si l'écosystème .NET est déjà en place et que l'on accepte un support communautaire plus mince sur la vision.</td></tr>
+        <tr><td>API métier</td><td>ASP.NET Core</td><td>FastAPI · NestJS</td><td>Mutualisable avec une infrastructure existante (VPS Linux, Nginx, PostgreSQL). Le choix est libre : l'API ne fait ni vision ni ML.</td></tr>
+        <tr><td>Service de vision</td><td>Sidecar Python (FastAPI)</td><td>appels API directs</td><td>Isole OpenCV et les modèles. En MVP pur API, ce service peut être différé — un simple relais suffit.</td></tr>
+        <tr><td>File d'attente</td><td>Redis + worker</td><td>RabbitMQ · Hangfire</td><td>Le traitement d'une page prend 3 à 8 s : indispensable dès le premier utilisateur simultané.</td></tr>
+        <tr><td>Stockage</td><td>S3 compatible + PostgreSQL (JSONB)</td><td>—</td><td>Le JSONB stocke la représentation intermédiaire et la rend interrogeable — clé pour la future banque de questions.</td></tr>
+        <tr><td>Rendu PDF</td><td class="n"><strong>Chromium sans interface (Playwright)</strong></td><td>—</td><td><span class="pill p-hard">choix contraint</span> Voir ci-dessous.</td></tr>
+        <tr><td>Polices</td><td>Amiri, Noto Naskh Arabic, Cairo, Tajawal, Almarai</td><td>—</td><td>Libres, couverture complète, et ce sont celles sur lesquelles les modèles arabes ouverts ont été entraînés.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="box warn">
+    <span class="bt">Le seul choix non négociable : le moteur de rendu</span>
+    <p>La composition arabe exige deux traitements que peu de bibliothèques implémentent correctement : l'<strong>algorithme bidirectionnel</strong> et le <strong>façonnage contextuel des glyphes</strong> (une lettre change de forme selon sa position dans le mot).</p>
+    <p>Le paysage est sans ambiguïté. PDFKit, et donc <code>react-pdf/renderer</code>, rend le RTL de façon incorrecte depuis 2019 : l'inversion naïve de chaîne casse les ligatures. ReportLab a ajouté un support RTL via HarfBuzz, mais le qualifie lui-même d'<em>expérimental</em>. Les générateurs de documents commerciaux ne sont majoritairement pas optimisés pour le RTL.</p>
+    <p>Les navigateurs, eux, embarquent HarfBuzz et un moteur BiDi complet depuis des années et le font parfaitement. <strong>Rendez en HTML/CSS et imprimez avec Chromium.</strong> Ce n'est pas un contournement, c'est la solution la plus solide disponible.</p>
+  </div>
+
+  <p>Pour l'export Word, même logique : passer par un modèle DOCX avec <code>&lt;w:bidi/&gt;</code> et <code>w:rtl</code> explicitement posés sur les paragraphes et les runs, et vérifier le rendu sur Word réel — LibreOffice et Word divergent sur le RTL.</p>
+</section>
+
+<!-- ======================= 08 COÛTS ======================= -->
+<section class="sec" id="s8">
+  <span class="eyebrow">§ 08 — Modèle de coûts</span>
+  <h2>Le coût de traitement est négligeable ; le coût humain ne l'est pas</h2>
+
+  <p>Chaîne recommandée à deux étages : un moteur OCR dédié pour le texte, les tableaux et les boîtes englobantes, puis une passe LLM bon marché pour transformer cette sortie en JSON sémantique typé.</p>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Poste</th><th class="n">1 000 pages</th><th class="n">10 000 pages</th><th class="n">100 000 pages</th></tr></thead>
+      <tbody>
+        <tr><td>Étage 1 — Mistral OCR 4 (batch)</td><td class="n">2 $</td><td class="n">20 $</td><td class="n">200 $</td></tr>
+        <tr><td>Étage 2 — structuration (Flash-Lite, batch)</td><td class="n">≈ 3 $</td><td class="n">≈ 30 $</td><td class="n">≈ 300 $</td></tr>
+        <tr><td>Stockage + calcul + rendu</td><td class="n">&lt; 1 $</td><td class="n">≈ 5 $</td><td class="n">≈ 40 $</td></tr>
+        <tr><td><strong>Total variable</strong></td><td class="n"><strong>≈ 6 $</strong></td><td class="n"><strong>≈ 55 $</strong></td><td class="n"><strong>≈ 540 $</strong></td></tr>
+        <tr><td>Alternative auto-hébergée (GPU dédié)</td><td class="n">180–300 $/mois, quel que soit le volume</td><td class="n">idem</td><td class="n">idem</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Hypothèses : ~3 000 jetons d'entrée et ~3 500 jetons de sortie par page pour l'étage 2. Le seuil de bascule vers l'auto-hébergement se situe vers <strong>35 000 à 60 000 pages par mois</strong>. En dessous, l'API est moins chère <em>et</em> vous économise l'exploitation d'un GPU.</p>
+
+  <div class="box key">
+    <span class="bt">Le vrai poste de coût</span>
+    <p>À 30–90 secondes de relecture par page, mille pages représentent <strong>8 à 25 heures de travail humain</strong>, contre 6 dollars de calcul. Le rapport est de un à mille.</p>
+    <p>Toute l'ingénierie produit doit donc viser un seul objectif : <strong>réduire le temps de relecture</strong>. Cela veut dire un éditeur mobile excellent, un surlignage des zones à faible confiance, une navigation d'erreur en erreur au pouce, et une correction en un geste. Améliorer le CER de 4 % à 3 % ne changera pas grand-chose ; faire passer la relecture de 90 à 30 secondes change tout.</p>
+  </div>
+</section>
+
+<!-- ======================= 09 FAISABILITÉ ======================= -->
+<section class="sec" id="s9">
+  <span class="eyebrow">§ 09 — Matrice de faisabilité</span>
+  <h2>Composant par composant, sans optimisme</h2>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Composant</th><th class="n">Difficulté</th><th class="n">Maturité 2026</th><th>Qualité attendue</th></tr></thead>
+      <tbody>
+        <tr><td>Capture, redressement, dewarping</td><td class="n"><span class="pill p-ok">faible</span></td><td class="n">mature</td><td>&gt; 95 % de pages exploitables</td></tr>
+        <tr><td>Filigrane clair sur fond blanc</td><td class="n"><span class="pill p-ok">faible</span></td><td class="n">mature</td><td>&gt; 98 %</td></tr>
+        <tr><td>Filigrane sur logo ou zone sombre</td><td class="n"><span class="pill p-mid">moyenne</span></td><td class="n">mature</td><td>≈ 70 % sans retouche</td></tr>
+        <tr><td>Texte arabe imprimé, page propre</td><td class="n"><span class="pill p-mid">moyenne</span></td><td class="n">mature</td><td>CER 2–8 %</td></tr>
+        <tr><td>Ordre de lecture avec marge de notation</td><td class="n"><span class="pill p-mid">moyenne</span></td><td class="n">à construire</td><td>90 % avec une règle dédiée</td></tr>
+        <tr><td>Intégrité des nombres (BiDi)</td><td class="n"><span class="pill p-hard">élevée</span></td><td class="n">à construire</td><td>100 % exigé — double lecture obligatoire</td></tr>
+        <tr><td>Tableaux bordés simples</td><td class="n"><span class="pill p-mid">moyenne</span></td><td class="n">mature</td><td>TEDS 80–92 %</td></tr>
+        <tr><td>Tableaux à cellules fusionnées</td><td class="n"><span class="pill p-hard">élevée</span></td><td class="n">partielle</td><td>TEDS 60–80 %</td></tr>
+        <tr><td>Jetons monétaires typés</td><td class="n"><span class="pill p-hard">élevée</span></td><td class="n">à construire</td><td>85–95 % après affinage spécifique</td></tr>
+        <tr><td>Formules mathématiques → LaTeX</td><td class="n"><span class="pill p-mid">moyenne</span></td><td class="n">mature (hors arabe)</td><td>Bon isolément, fragile en contexte mixte</td></tr>
+        <tr><td>Écriture manuscrite arabe</td><td class="n"><span class="pill p-hard">élevée</span></td><td class="n">émergente</td><td>Utilisable en indication seulement</td></tr>
+        <tr><td>Rendu RTL fidèle</td><td class="n"><span class="pill p-mid">moyenne</span></td><td class="n">mature via Chromium</td><td>Excellent</td></tr>
+        <tr><td>Fidélité 100 % entièrement automatique</td><td class="n"><span class="pill p-hard">—</span></td><td class="n"><span class="pill p-hard">irréaliste</span></td><td>Ne pas le promettre</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Les cinq risques qui feraient échouer le projet</h3>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Risque</th><th class="n">Prob.</th><th class="n">Impact</th><th>Parade</th></tr></thead>
+      <tbody>
+        <tr><td>Une erreur numérique passe et un enseignant distribue un sujet faux</td><td class="n">élevée</td><td class="n">critique</td><td>Double lecture des nombres par deux moteurs, blocage de l'export en cas de divergence</td></tr>
+        <tr><td>La relecture est plus longue que la retaperie manuelle</td><td class="n">moyenne</td><td class="n">fatal</td><td>Mesurer le temps de relecture dès la semaine 2, avant d'écrire l'app</td></tr>
+        <tr><td>Rejet en revue App Store / Play Store</td><td class="n">moyenne</td><td class="n">élevé</td><td>Positionnement « numérisation de vos documents », § 12</td></tr>
+        <tr><td>Le rendu RTL casse chez l'utilisateur (police manquante)</td><td class="n">moyenne</td><td class="n">moyen</td><td>Polices embarquées et sous-ensemblées, jamais de police système</td></tr>
+        <tr><td>Dérive des tarifs API</td><td class="n">moyenne</td><td class="n">faible</td><td>Couche d'abstraction moteur dès le départ ; le passage à l'auto-hébergé reste ouvert</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ======================= 10 MÉTRIQUES ======================= -->
+<section class="sec" id="s10">
+  <span class="eyebrow">§ 10 — Qualité et mesure</span>
+  <h2>Quatre métriques standard, et une cinquième qui décide de tout</h2>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Métrique</th><th>Mesure</th><th class="n">Cible</th></tr></thead>
+      <tbody>
+        <tr><td><strong>CER</strong> — taux d'erreur caractère</td><td>Qualité brute du texte</td><td class="n">&lt; 5 %</td></tr>
+        <tr><td><strong>WER</strong> — taux d'erreur mot</td><td>Lisibilité perçue</td><td class="n">&lt; 15 %</td></tr>
+        <tr><td><strong>TEDS</strong> — distance d'édition d'arbre</td><td>Exactitude de la structure des tableaux</td><td class="n">&gt; 85 %</td></tr>
+        <tr><td><strong>F1 blocs</strong></td><td>Détection correcte des régions</td><td class="n">&gt; 0,90</td></tr>
+        <tr><td class="n"><strong>NER</strong> — <em>Numeric Exactness Rate</em></td><td>Part des nombres restitués <em>exactement</em></td><td class="n"><strong>100 %</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="box key">
+    <span class="bt">La métrique bloquante</span>
+    <p>Sur un sujet de mathématiques, une erreur de caractère dans un mot est une coquille ; une erreur de chiffre rend l'exercice insoluble ou faux. Ces deux erreurs pèsent identiquement dans le CER — c'est pourquoi le CER seul est un mauvais indicateur ici.</p>
+    <p><strong>Mécanisme proposé.</strong> Extraire tous les jetons numériques, les faire relire par un second moteur indépendant, et comparer. En cas de divergence : surlignage rouge, saisie manuelle obligatoire, export bloqué. C'est peu coûteux (les nombres représentent une fraction infime des jetons) et cela supprime le seul mode de défaillance vraiment destructeur pour la confiance de l'utilisateur.</p>
+  </div>
+
+  <h3>Le jeu de test, à construire avant tout le reste</h3>
+  <p>50 pages annotées à la main, couvrant délibérément les cas durs : tableaux fusionnés, fractions, figures géométriques, photos prises de travers, filigranes différents, pages de plusieurs sources. C'est six à huit jours de travail, et c'est le meilleur investissement du projet : sans ce jeu, tout choix de moteur relève de l'impression.</p>
+</section>
+
+<!-- ======================= 11 ROADMAP ======================= -->
+<section class="sec" id="s11">
+  <span class="eyebrow">§ 11 — Feuille de route</span>
+  <h2>Le banc d'essai d'abord, l'application ensuite</h2>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Phase</th><th>Livrable</th><th class="n">Effort</th><th>Critère de sortie</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>0 · Banc d'essai</strong></td>
+          <td>50 pages annotées + script comparant 5 moteurs sur CER, TEDS, NER, coût, latence</td>
+          <td class="n">6–8 j</td>
+          <td>Un moteur retenu, avec des chiffres et non une intuition</td>
+        </tr>
+        <tr>
+          <td><strong>1 · Pipeline serveur</strong></td>
+          <td>API <code>image → JSON → HTML/PDF</code>, nettoyage, layout, OCR, tableaux, rendu Chromium</td>
+          <td class="n">15–20 j</td>
+          <td>Une page type reconstruite correctement de bout en bout</td>
+        </tr>
+        <tr>
+          <td><strong>2 · Application mobile</strong></td>
+          <td>Capture guidée, détection de bords, envoi, file d'attente, visualisation</td>
+          <td class="n">12–16 j</td>
+          <td>Photo → PDF propre en moins de 15 s</td>
+        </tr>
+        <tr>
+          <td><strong>3 · Éditeur de correction</strong></td>
+          <td>Édition RTL au doigt, navigation entre zones douteuses, correction des nombres, repli image par bloc</td>
+          <td class="n">15–20 j</td>
+          <td><strong>Relecture sous 60 s/page mesurée sur 20 pages</strong></td>
+        </tr>
+        <tr>
+          <td><strong>4 · Exports et finition</strong></td>
+          <td>DOCX, PDF, partage, historique, comptes</td>
+          <td class="n">8–10 j</td>
+          <td>Prêt pour un test utilisateur réel</td>
+        </tr>
+        <tr><td colspan="2"><strong>Total MVP</strong></td><td class="n"><strong>56–74 j·h</strong></td><td>≈ 3–4 mois à mi-temps</td></tr>
+        <tr>
+          <td>V2</td>
+          <td>Banque de questions, génération de variantes, corrigés automatiques</td>
+          <td class="n">+ 25–35 j</td>
+          <td>C'est ici que le produit devient défendable</td>
+        </tr>
+        <tr>
+          <td>V3</td>
+          <td>Mode hors-ligne iOS (Vision), affinage d'un modèle arabe sur votre corpus, écriture manuscrite</td>
+          <td class="n">+ 30–45 j</td>
+          <td>Optionnel, dépend de la traction</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="box">
+    <span class="bt">La règle qui économise deux mois</span>
+    <p>La phase 0 doit être menée <strong>en ligne de commande, sans une ligne de code applicatif</strong>. Si aucun moteur n'atteint les cibles sur vos 50 pages réelles, aucune application ne rattrapera cela — et vous l'aurez appris pour huit jours au lieu de trois mois.</p>
+  </div>
+</section>
+
+<!-- ======================= 12 JURIDIQUE ======================= -->
+<section class="sec" id="s12">
+  <span class="eyebrow">§ 12 — Cadre juridique et diffusion</span>
+  <h2>La technologie est neutre ; l'usage décrit dans la demande ne l'est pas</h2>
+
+  <p>Il faut être précis ici, parce que le sujet conditionne à la fois la mise en magasin d'applications et la viabilité commerciale. Je ne suis pas juriste et ce qui suit n'est pas un avis juridique — c'est un repérage des textes applicables, à faire valider avant toute diffusion.</p>
+
+  <h4>Ce qui est parfaitement légitime</h4>
+  <p>Numériser <em>vos</em> documents, ceux de votre établissement, ou des documents dont vous détenez les droits ou que leur licence autorise à réutiliser. C'est un besoin réel et très mal servi pour l'arabe — rappelons qu'Acrobat ne sait toujours pas le lire.</p>
+
+  <h4>Ce qui expose</h4>
+  <p>Récupérer les documents d'un site tiers, en retirer le filigrane et les rediffuser. Deux fondements distincts s'appliquent :</p>
+  <ul>
+    <li><strong>La reproduction elle-même.</strong> En droit français, la reproduction sans autorisation constitue une contrefaçon (art. L122-4 CPI), sanctionnée pénalement par l'art. L335-2. En Tunisie, la loi n° 94-36 du 24 février 1994 sur la propriété littéraire et artistique, modifiée en 2009, joue le même rôle. Nuance importante : l'énoncé d'un exercice officiel peut relever d'un régime différent de sa <em>mise en forme</em>, de sa <em>compilation</em> et de son <em>édition</em> par un site privé — ces dernières sont protégées de façon autonome.</li>
+    <li><strong>Le retrait du filigrane, en tant que tel.</strong> Le CPI protège spécifiquement les « informations sous forme électronique relatives au régime des droits » (art. L331-11). L'art. L335-4-2 sanctionne leur suppression ou modification, et punit de six mois d'emprisonnement et 30 000 € d'amende le fait de <em>procurer à autrui des moyens spécialement conçus</em> pour supprimer un tel élément d'information. Autrement dit, l'exposition ne pèse pas seulement sur l'utilisateur final : elle peut viser l'outil lui-même s'il est présenté comme un effaceur de filigranes.</li>
+  </ul>
+
+  <h4>Le risque le plus probable, en pratique</h4>
+  <p>Avant tout contentieux, vous rencontrerez la modération des magasins d'applications. Apple et Google écartent régulièrement les applications dont la fonction annoncée est de contourner des protections ou de retirer des marquages. Une capture d'écran de votre fiche produit suffit à motiver un refus.</p>
+
+  <div class="box warn">
+    <span class="bt">Mitigations concrètes</span>
+    <ul style="margin-bottom:0">
+      <li>Positionner le produit comme un <strong>numériseur de documents pédagogiques</strong> — la reconstruction, pas l'effacement. C'est d'ailleurs ce qu'il fait techniquement.</li>
+      <li>Faire attester à l'utilisateur, au premier import, qu'il détient les droits sur les documents traités.</li>
+      <li>Ne jamais intégrer de collecte automatisée de sites tiers : le produit traite ce que l'utilisateur photographie ou importe.</li>
+      <li>Conserver les métadonnées de provenance dans le JSON, sans les imposer au rendu.</li>
+      <li>Ne pas construire de fonction dont le seul objet est la détection et la suppression de marquages : le nettoyage doit rester un pré-traitement OCR, techniquement subordonné.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ======================= 13 PIVOTS ======================= -->
+<section class="sec" id="s13">
+  <span class="eyebrow">§ 13 — Repositionnements</span>
+  <h2>Le même moteur, trois produits nettement plus solides</h2>
+
+  <p>La partie difficile — analyse de mise en page arabe, structuration, rendu RTL fidèle — est identique dans les trois cas. Seule l'entrée change. Et dans les trois cas, la valeur est supérieure à celle de la copie.</p>
+
+  <h3>A · Le générateur de sujets</h3>
+  <p>Une fois qu'une page est en JSON typé, changer <code>43500</code> en <code>38700</code> et régénérer un PDF impeccable est trivial. Vous passez de « copier un sujet » à « produire trente variantes d'un sujet », avec corrigé. Aucun risque juridique si le corpus de départ est le vôtre, et c'est un produit que personne ne peut copier sans refaire tout le pipeline.</p>
+
+  <h3>B · La numérisation d'archives scolaires</h3>
+  <p>Les établissements tunisiens, marocains et du Golfe disposent de décennies de sujets papier et n'ont aucun outil arabophone correct pour les exploiter. Vente B2B, volumes prévisibles, documents dont le client détient les droits. Le maillon faible du marché est précisément celui que vous auriez construit.</p>
+
+  <h3>C · L'API de reconstruction de documents arabes</h3>
+  <p>Vendre le pipeline en tant que service à d'autres acteurs de l'edtech arabophone. Le marché est étroit mais très peu concurrentiel, et le positionnement — <em>structure</em> plutôt que texte brut — vous distingue immédiatement de Mistral ou Google, qui s'arrêtent au Markdown.</p>
+
+  <div class="box key">
+    <span class="bt">Recommandation stratégique</span>
+    <p>Construisez la phase 0 et la phase 1 telles quelles : elles sont communes à tous les scénarios. Décidez du positionnement au moment de la phase 2, quand vous aurez des chiffres de qualité réels — et pas avant. Ce sont eux, pas l'intuition, qui indiqueront si le produit tient sur la reconstruction seule ou s'il doit basculer vers la génération.</p>
+  </div>
+</section>
+
+<!-- ======================= 14 ANNEXES ======================= -->
+<section class="sec" id="s14">
+  <span class="eyebrow">§ 14 — Annexes techniques</span>
+  <h2>Amorces de code et références</h2>
+
+  <h3>A · Séparation par luminance (neutralisation du filigrane)</h3>
+  <pre><span class="kw">import</span> cv2, numpy <span class="kw">as</span> np
+
+<span class="kw">def</span> nettoyer(chemin, seuil_encre=<span class="st">120</span>, seuil_papier=<span class="st">165</span>):
+    g = cv2.imread(chemin, cv2.IMREAD_GRAYSCALE)
+    g = cv2.fastNlMeansDenoising(g, <span class="kw">None</span>, <span class="st">7</span>, <span class="st">7</span>, <span class="st">21</span>)
+
+    <span class="cm"># 1. Le filigrane vit entre les deux seuils : on l'écrase vers le blanc</span>
+    zone_filigrane = (g > seuil_encre) & (g < <span class="st">245</span>)
+    g[zone_filigrane] = <span class="st">255</span>
+
+    <span class="cm"># 2. On re-densifie l'encre survivante (croisements filigrane/texte)</span>
+    encre = g < seuil_papier
+    g[encre] = np.clip(g[encre] * <span class="st">0.55</span>, <span class="st">0</span>, <span class="st">255</span>).astype(np.uint8)
+
+    <span class="cm"># 3. Binarisation adaptative pour l'OCR</span>
+    <span class="kw">return</span> cv2.adaptiveThreshold(
+        g, <span class="st">255</span>, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, blockSize=<span class="st">31</span>, C=<span class="st">12</span>)</pre>
+  <p class="cap">Les seuils sont à recalibrer par source : chaque site utilise une opacité différente. Un histogramme sur 20 pages du même site donne les bonnes valeurs en quelques minutes.</p>
+
+  <h3>B · Consigne de structuration pour modèle vision-langage</h3>
+  <pre><span class="cm">Tu analyses une page d'évaluation scolaire tunisienne en arabe.
+Rends UNIQUEMENT du JSON, sans commentaire ni balise de code.
+
+Règles impératives :
+- Texte arabe en ORDRE LOGIQUE Unicode, jamais en ordre visuel.
+- Les nombres restent en chiffres occidentaux, dans leur ordre d'écriture.
+  Ne les inverse jamais. En cas de doute, confiance &lt; 0.5.
+- La colonne étroite de notation en marge est une région à part
+  (role = "marge_notation"). Ne la fusionne pas avec le corps.
+- Les ovales contenant un montant sont des "jeton_monetaire",
+  pas du texte. Donne valeur numérique + unité.
+- Ignore tout filigrane, URL de site ou mention de source.
+
+Schéma :
+{ "page": { "largeur":int, "hauteur":int },
+  "regions": [ { "id":str,
+      "role":"entete|consigne|enonce|tableau|figure|ligne_reponse|marge_notation",
+      "bbox":[x1,y1,x2,y2], "direction":"rtl|ltr",
+      "contenu": ..., "confiance":float } ],
+  "nombres": [ { "valeur":str, "bbox":[...], "confiance":float } ] }</span></pre>
+  <p class="cap">Le tableau <code>nombres</code> est volontairement redondant avec le contenu : il alimente la double lecture décrite au § 10.</p>
+
+  <h3>C · Gabarit de rendu RTL</h3>
+  <pre>&lt;<span class="kw">html</span> <span class="st">lang</span>=<span class="st">"ar"</span> <span class="st">dir</span>=<span class="st">"rtl"</span>&gt;
+&lt;<span class="kw">style</span>&gt;
+  <span class="cm">/* Police embarquée et sous-ensemblée : jamais de police système */</span>
+  @font-face { font-family:"Amiri"; src:url(amiri-subset.woff2) format("woff2"); }
+  @page { size:A4; margin:12mm 14mm; }
+  body { font-family:"Amiri",serif; direction:rtl; }
+  <span class="cm">/* Isole les nombres du flux bidirectionnel */</span>
+  .num { unicode-bidi:isolate; direction:ltr; }
+  table { border-collapse:collapse; width:100%; direction:rtl; }
+  td,th { border:1px solid #000; padding:4px 6px; }
+&lt;/<span class="kw">style</span>&gt;</pre>
+  <p>Impression : <code>page.pdf({format:'A4', printBackground:true, preferCSSPageSize:true})</code> sous Playwright. La classe <code>.num</code> avec <code>unicode-bidi:isolate</code> est la protection la plus efficace contre l'inversion des chiffres au rendu.</p>
+
+  <h3>D · Ressources</h3>
+  <ul>
+    <li><strong>Benchmarks</strong> — KITAB-Bench (MBZUAI, ACL 2025), Misraj-DocOCR, OmniDocBench, olmOCR-Bench.</li>
+    <li><strong>Modèles arabes ouverts</strong> — Qari-OCR (riotu-lab / NAMAA-Space), Baseer, dots.ocr, PaddleOCR-VL.</li>
+    <li><strong>Jeux de données</strong> — SARD (1 000 images, 5 polices arabes), KHATT et Muharaf pour le manuscrit.</li>
+    <li><strong>Polices</strong> — Amiri, Noto Naskh Arabic, Cairo, Tajawal, Almarai, Scheherazade New.</li>
+    <li><strong>Bibliothèques</strong> — OpenCV, Leptonica, HarfBuzz, python-bidi, arabic-reshaper, Playwright, pix2text, texify.</li>
+  </ul>
+</section>
+
+</main>
+</div>
+
+<footer>
+  <div class="foot-in">
+    <div style="font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:var(--repere);margin-bottom:.9rem">Sources principales consultées</div>
+    <ul class="srcs" style="list-style:none;padding:0;margin-top:0">
+      <li>KITAB-Bench, benchmark multi-domaines pour l'OCR arabe — <a href="https://github.com/mbzuai-oryx/KITAB-Bench">github.com/mbzuai-oryx/KITAB-Bench</a> · arXiv 2502.14949</li>
+      <li>QARI-OCR, reconnaissance arabe haute fidélité — arXiv 2506.02295</li>
+      <li>Baseer, modèle vision-langage arabe document→Markdown</li>
+      <li>Mistral OCR 4 — <a href="https://mistral.ai/news/ocr-4/">mistral.ai/news/ocr-4</a> et grille tarifaire API</li>
+      <li>Apple, « Read documents using the Vision framework », WWDC25 session 272</li>
+      <li>Google, ML Kit Text Recognition v2 — langues et écritures prises en charge</li>
+      <li>PaddleOCR-VL — fiche modèle et retours d'exécution sur page arabe</li>
+      <li>Comparatifs d'OCR auto-hébergés et coûts GPU, 2026</li>
+      <li>Code de la propriété intellectuelle, art. L122-4, L331-11, L335-2, L335-4-2 (Légifrance)</li>
+      <li>ReportLab, support arabe expérimental via HarfBuzz ; limites RTL de PDFKit</li>
+      <li>Littérature sur le prétraitement d'images documentaires et son effet sur l'exactitude OCR</li>
+    </ul>
+    <p style="margin-top:1.6rem;max-width:70ch;line-height:1.6">Étude établie le 4 août 2026 à partir des deux évaluations de mathématiques fournies. Les tarifs, versions de modèles et niveaux de performance cités évoluent rapidement : à revérifier avant tout engagement contractuel. Le § 12 constitue un repérage de textes, non un avis juridique.</p>
+  </div>
+</footer>
+
+</body>
+</html>

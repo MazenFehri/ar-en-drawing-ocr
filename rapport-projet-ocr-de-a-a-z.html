@@ -1,0 +1,897 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Microservice OCR arabe & anglais — Le projet de A à Z</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Arabic:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&family=Amiri:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --encre:#101418;
+  --papier:#F1F3F1;
+  --blanc:#FFFFFF;
+  --repere:#00838F;
+  --detect:#B4005E;
+  --graphite:#5B6670;
+  --trame:#D8DBD7;
+  --ambre:#8A5A00;
+  --ambre-bg:#FBF3E4;
+  --vert:#1E6B3A;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --cond:"IBM Plex Sans Condensed","Helvetica Neue",Arial,sans-serif;
+  --serif:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+  --ar:"IBM Plex Sans Arabic","Segoe UI",Tahoma,sans-serif;
+  --naskh:"Amiri","Traditional Arabic",serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--papier);color:var(--encre);
+  font-family:var(--serif);font-size:17px;line-height:1.62;
+  font-feature-settings:"kern","liga";
+}
+
+/* ---------- masthead ---------- */
+.masthead{border-bottom:1px solid var(--encre);background:var(--blanc)}
+.masthead-in{max-width:1180px;margin:0 auto;padding:2.4rem 1.4rem 1.8rem}
+.kicker{
+  font-family:var(--mono);font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--repere);display:flex;flex-wrap:wrap;gap:.4rem 1.2rem;margin-bottom:1.1rem
+}
+.kicker span{white-space:nowrap}
+h1{
+  font-family:var(--cond);font-weight:700;font-size:clamp(1.9rem,5.2vw,3.15rem);
+  line-height:1.06;letter-spacing:-.015em;margin:0 0 .7rem;max-width:22ch
+}
+.dek{font-size:1.03rem;color:var(--graphite);max-width:62ch;margin:0}
+.meta-strip{
+  display:flex;flex-wrap:wrap;gap:.35rem 1.6rem;margin-top:1.5rem;padding-top:1rem;
+  border-top:1px solid var(--trame);font-family:var(--mono);font-size:.72rem;color:var(--graphite)
+}
+.meta-strip b{color:var(--encre);font-weight:500}
+
+/* ---------- shell ---------- */
+.shell{max-width:1180px;margin:0 auto;padding:0 1.4rem;display:grid;grid-template-columns:1fr;gap:0}
+@media(min-width:1000px){
+  .shell{grid-template-columns:200px minmax(0,1fr);gap:3.4rem;padding-top:2.6rem}
+}
+.rail{display:none}
+@media(min-width:1000px){
+  .rail{display:block;position:sticky;top:1.6rem;align-self:start;max-height:calc(100vh - 3rem);overflow:auto}
+  .rail ol{list-style:none;margin:0;padding:0;font-family:var(--mono);font-size:.74rem;line-height:1.5}
+  .rail li{margin-bottom:.5rem}
+  .rail a{color:var(--graphite);text-decoration:none;display:block;border-left:2px solid var(--trame);padding-left:.6rem}
+  .rail a:hover{color:var(--repere);border-left-color:var(--repere)}
+  .rail .rail-t{font-family:var(--mono);font-size:.64rem;letter-spacing:.14em;text-transform:uppercase;color:var(--repere);margin-bottom:.8rem}
+}
+main{min-width:0;padding:2rem 0 4rem}
+
+/* ---------- sections ---------- */
+.sec{margin:0 0 3.4rem;scroll-margin-top:1rem}
+.sec > h2{
+  font-family:var(--cond);font-weight:700;font-size:clamp(1.35rem,3.4vw,1.85rem);
+  line-height:1.12;letter-spacing:-.01em;margin:.35rem 0 1rem;max-width:32ch
+}
+.eyebrow{
+  font-family:var(--mono);font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--repere);display:block;padding-bottom:.45rem;border-bottom:1px solid var(--trame)
+}
+h3{font-family:var(--cond);font-weight:600;font-size:1.12rem;letter-spacing:.005em;margin:2rem 0 .55rem}
+h4{font-family:var(--mono);font-weight:600;font-size:.8rem;letter-spacing:.06em;text-transform:uppercase;color:var(--graphite);margin:1.4rem 0 .4rem}
+p{margin:0 0 1rem;max-width:74ch}
+ul,ol{max-width:74ch;padding-left:1.15rem;margin:0 0 1rem}
+li{margin-bottom:.4rem}
+strong{font-weight:600}
+em{font-style:italic}
+code{font-family:var(--mono);font-size:.86em;background:#E7EAE7;padding:.1em .35em;border-radius:2px}
+a{color:var(--repere)}
+
+/* ---------- hero ---------- */
+.hero{margin:0 0 3.2rem}
+.hero-lab{font-family:var(--mono);font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--repere);margin-bottom:.8rem}
+.split{display:grid;grid-template-columns:1fr;gap:1.6rem}
+@media(min-width:760px){.split{grid-template-columns:1fr 1fr;gap:1.1rem}}
+.pane{position:relative;background:var(--blanc);border:1px solid var(--trame);padding:1.5rem 1.1rem 1.1rem}
+.pane::before,.pane::after{content:"";position:absolute;width:13px;height:13px;pointer-events:none}
+.pane::before{top:-1px;left:-1px;border-top:2px solid var(--repere);border-left:2px solid var(--repere)}
+.pane::after{bottom:-1px;right:-1px;border-bottom:2px solid var(--repere);border-right:2px solid var(--repere)}
+.pane-tag{
+  position:absolute;top:-1px;right:-1px;background:var(--repere);color:#fff;
+  font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;padding:.18rem .5rem
+}
+.pane.alt .pane-tag{background:var(--detect)}
+.pane.alt::before{border-color:var(--detect)}
+.pane.alt::after{border-color:var(--detect)}
+.pane-note{font-family:var(--mono);font-size:.66rem;color:var(--graphite);margin-top:.9rem;padding-top:.6rem;border-top:1px dotted var(--trame)}
+
+/* plan schématique */
+.plan{position:relative;height:300px;background:#FCFDFC;border:1px solid #E4E7E4;overflow:hidden}
+.pw{position:absolute;border:1.6px solid #2A3238}
+.plbl{position:absolute;font-size:.6rem;font-family:var(--ar);color:#1A2126;white-space:nowrap}
+.plbl.en{font-family:var(--cond);font-weight:600}
+.pcirc{position:absolute;border:1.6px solid #2A3238;border-radius:50%}
+.ptri{position:absolute;width:0;height:0;border-left:9px solid transparent;border-right:9px solid transparent;border-bottom:16px solid #2A3238}
+.pscrawl{position:absolute;font-family:var(--cond);font-style:italic;font-size:.58rem;color:#4A545B;transform:rotate(-7deg)}
+.pdim{position:absolute;border-top:1px solid #2A3238}
+/* overlays de détection */
+.ovl{position:absolute;z-index:3;pointer-events:none}
+.ovl b{
+  position:absolute;top:-9px;left:0;font-family:var(--mono);font-weight:500;
+  font-size:.5rem;letter-spacing:.06em;text-transform:uppercase;color:#fff;padding:0 .25rem;white-space:nowrap
+}
+.ovl.c{border:1.5px dashed var(--repere)} .ovl.c b{background:var(--repere)}
+.ovl.m{border:1.5px dashed var(--detect)} .ovl.m b{background:var(--detect)}
+.ovl.g{border:1.5px dashed var(--ambre)} .ovl.g b{background:var(--ambre)}
+/* poignées Word */
+.hnd{position:absolute;z-index:4;pointer-events:none;border:1px solid #1F7AC4}
+.hnd i{position:absolute;width:5px;height:5px;background:#fff;border:1px solid #1F7AC4}
+.hnd i:nth-child(1){top:-3px;left:-3px}
+.hnd i:nth-child(2){top:-3px;right:-3px}
+.hnd i:nth-child(3){bottom:-3px;left:-3px}
+.hnd i:nth-child(4){bottom:-3px;right:-3px}
+
+/* ---------- tables ---------- */
+.tw{overflow-x:auto;margin:1.2rem 0 1.5rem;border:1px solid var(--trame);background:var(--blanc)}
+table.d{border-collapse:collapse;width:100%;min-width:560px;font-family:var(--cond);font-size:.83rem}
+table.d th,table.d td{padding:.55rem .7rem;text-align:left;border-bottom:1px solid var(--trame);vertical-align:top}
+table.d thead th{
+  font-family:var(--mono);font-size:.63rem;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--graphite);background:#E9ECE9;border-bottom:1px solid var(--encre);font-weight:500;white-space:nowrap
+}
+table.d tbody tr:last-child td{border-bottom:0}
+table.d td.n,table.d th.n{font-family:var(--mono);font-size:.78rem;white-space:nowrap}
+.cap{font-family:var(--mono);font-size:.66rem;color:var(--graphite);margin:-.9rem 0 1.6rem}
+.ar-inline{font-family:var(--ar);direction:rtl;unicode-bidi:isolate}
+
+/* pastilles */
+.pill{font-family:var(--mono);font-size:.66rem;padding:.1rem .4rem;border:1px solid;border-radius:2px;white-space:nowrap;display:inline-block}
+.p-ok{color:var(--vert);border-color:#9CC3AB;background:#EDF5F0}
+.p-mid{color:var(--ambre);border-color:#D9C293;background:var(--ambre-bg)}
+.p-hard{color:var(--detect);border-color:#E0A6C4;background:#FBEDF4}
+.p-off{color:var(--graphite);border-color:#C3C9C3;background:#EDEFED}
+
+/* ---------- barres ---------- */
+.bars{margin:1.2rem 0 .4rem;border:1px solid var(--trame);background:var(--blanc);padding:1.1rem}
+.bar-row{display:grid;grid-template-columns:118px 1fr 62px;gap:.6rem;align-items:center;margin-bottom:.5rem}
+.bar-row .lab{font-family:var(--mono);font-size:.7rem;text-align:right;color:var(--encre)}
+.bar-track{background:#E9ECE9;height:14px;position:relative}
+.bar-fill{height:100%;background:var(--repere)}
+.bar-fill.warn{background:var(--detect)}
+.bar-fill.good{background:var(--vert)}
+.bar-row .val{font-family:var(--mono);font-size:.7rem;color:var(--graphite)}
+
+/* ---------- encadrés ---------- */
+.box{border-left:3px solid var(--repere);background:var(--blanc);padding:1rem 1.1rem;margin:1.4rem 0;border-top:1px solid var(--trame);border-right:1px solid var(--trame);border-bottom:1px solid var(--trame)}
+.box p:last-child,.box ul:last-child{margin-bottom:0}
+.box .bt{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--repere);display:block;margin-bottom:.4rem}
+.box.warn{border-left-color:var(--ambre);background:var(--ambre-bg)}
+.box.warn .bt{color:var(--ambre)}
+.box.key{border-left-color:var(--detect)}
+.box.key .bt{color:var(--detect)}
+
+/* ---------- code ---------- */
+pre{
+  background:#12181D;color:#D8E0E4;padding:1rem 1.1rem;overflow-x:auto;
+  font-family:var(--mono);font-size:.75rem;line-height:1.6;margin:1rem 0 1.5rem;border-radius:2px
+}
+pre .cm{color:#7C8F99}
+pre .kw{color:#6FC3D1}
+pre .st{color:#E39BC0}
+pre .ky{color:#9FD9A0}
+
+/* ---------- étapes ---------- */
+.steps{counter-reset:st;list-style:none;padding:0;margin:1.2rem 0}
+.steps > li{
+  counter-increment:st;position:relative;padding:0 0 1.2rem 3.1rem;margin:0;
+  border-left:1px solid var(--trame);margin-left:.9rem
+}
+.steps > li:last-child{border-left-color:transparent;padding-bottom:0}
+.steps > li::before{
+  content:counter(st,decimal-leading-zero);position:absolute;left:-.9rem;top:0;
+  width:1.8rem;height:1.8rem;background:var(--encre);color:#fff;border-radius:50%;
+  font-family:var(--mono);font-size:.66rem;display:flex;align-items:center;justify-content:center
+}
+.steps h4{margin-top:.15rem}
+
+/* ---------- flux pipeline ---------- */
+.flux{display:flex;flex-wrap:wrap;gap:.35rem;align-items:stretch;margin:1.2rem 0 1.4rem;font-family:var(--mono);font-size:.63rem}
+.flux .st{background:var(--blanc);border:1px solid var(--trame);border-top:2px solid var(--repere);padding:.5rem .6rem;flex:1 1 110px;min-width:104px}
+.flux .st b{display:block;font-weight:600;font-size:.66rem;margin-bottom:.15rem;letter-spacing:.02em}
+.flux .st span{color:var(--graphite);display:block;line-height:1.35}
+.flux .st.opt{border-top-color:var(--ambre);background:var(--ambre-bg)}
+.flux .st.io{border-top-color:var(--encre);background:#E9ECE9}
+
+/* ---------- footer ---------- */
+footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem}
+.foot-in{max-width:1180px;margin:0 auto;padding:2.2rem 1.4rem 3rem;font-family:var(--mono);font-size:.72rem;color:var(--graphite)}
+.srcs li{margin-bottom:.45rem}
+
+/* ---------- impression ---------- */
+@media print{
+  body{background:#fff;font-size:10.5pt}
+  .rail{display:none}
+  .shell{grid-template-columns:1fr;padding-top:0}
+  .sec{break-inside:auto;page-break-inside:auto}
+  .sec > h2,h3,h4{break-after:avoid;page-break-after:avoid}
+  .tw,.box,.bars,pre,.pane{break-inside:avoid;page-break-inside:avoid}
+  .masthead,.pane,.box,.tw,.bars{border-color:#999}
+  a{color:inherit;text-decoration:none}
+  pre{background:#f4f4f4;color:#111;border:1px solid #ccc}
+  pre .cm{color:#666} pre .kw{color:#036} pre .st{color:#803} pre .ky{color:#063}
+}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-in">
+    <div class="kicker">
+      <span>Rapport de projet</span>
+      <span>OCR arabe &amp; anglais · formes · RTL</span>
+      <span>Microservice FastAPI → .NET</span>
+      <span>Août 2026</span>
+    </div>
+    <h1>Une image de plan devient un document Word éditable, sans quitter la machine</h1>
+    <p class="dek">Tout le projet de bout en bout : le contrat d'interface, les sept étages du pipeline, la raison mesurée derrière chaque constante de réglage, les options fermées et pourquoi, les défauts encore ouverts, et ce qu'il reste à faire. Chaque chiffre cité vient d'une exécution réelle, pas d'une fiche produit.</p>
+    <div class="meta-strip">
+      <span>État : <b>en service, 157 tests</b></span>
+      <span>Coût par page : <b>0 € — OCR local, CPU</b></span>
+      <span>Page typique : <b>82 éléments en 5,6 s</b></span>
+      <span>Exactitude mesurée : <b>CER 0,000 (EN) · 0,166 (AR 45 DPI)</b></span>
+    </div>
+  </div>
+</header>
+
+<div class="shell">
+
+<nav class="rail" aria-label="Sommaire">
+  <div class="rail-t">Sommaire</div>
+  <ol>
+    <li><a href="#s0">Résumé exécutif</a></li>
+    <li><a href="#s1">01 · Le contrat d'interface</a></li>
+    <li><a href="#s2">02 · Les sept étages</a></li>
+    <li><a href="#s3">03 · Prétraitement</a></li>
+    <li><a href="#s4">04 · OCR &amp; routage par écriture</a></li>
+    <li><a href="#s5">05 · Détection de formes</a></li>
+    <li><a href="#s6">06 · Mise en page &amp; RTL</a></li>
+    <li><a href="#s7">07 · Le relecteur LLM</a></li>
+    <li><a href="#s8">08 · Word &amp; sidecar</a></li>
+    <li><a href="#s9">09 · Mesures</a></li>
+    <li><a href="#s10">10 · Décisions fermées</a></li>
+    <li><a href="#s11">11 · Limites &amp; défauts</a></li>
+    <li><a href="#s12">12 · Durcissement</a></li>
+    <li><a href="#s13">13 · Feuille de route</a></li>
+    <li><a href="#s14">14 · Annexes</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<!-- ======================= HERO ======================= -->
+<section class="hero" aria-label="Démonstration du principe">
+  <div class="hero-lab">Le principe, en une image · ce que le moteur voit → ce que Word reçoit</div>
+  <div class="split">
+
+    <div class="pane alt">
+      <span class="pane-tag">01 · l'image reçue</span>
+      <div class="plan">
+        <div class="pw" style="top:26px;left:22px;width:150px;height:110px"></div>
+        <div class="pw" style="top:26px;left:172px;width:104px;height:110px"></div>
+        <div class="pw" style="top:136px;left:22px;width:254px;height:78px"></div>
+        <div class="pcirc" style="top:150px;left:236px;width:28px;height:28px"></div>
+        <div class="ptri" style="top:32px;left:296px"></div>
+        <div class="pdim" style="top:232px;left:22px;width:254px"></div>
+
+        <div class="plbl" style="top:66px;left:60px">غرفة المعيشة</div>
+        <div class="plbl" style="top:70px;left:196px">مطبخ</div>
+        <div class="plbl" style="top:160px;left:70px">Corridor — 14.80 m</div>
+        <div class="plbl en" style="top:157px;left:240px;font-size:.5rem">WC</div>
+        <div class="plbl en" style="top:52px;left:290px;font-size:.5rem">N</div>
+        <div class="plbl en" style="top:236px;left:120px;font-size:.55rem">14.80 m</div>
+        <div class="pscrawl" style="top:186px;left:288px">rev. B</div>
+
+        <div class="ovl c" style="top:58px;left:56px;width:82px;height:16px"><b>texte 0.98</b></div>
+        <div class="ovl c" style="top:62px;left:192px;width:38px;height:16px"><b>0.94</b></div>
+        <div class="ovl m" style="top:22px;left:18px;width:158px;height:118px"><b>rect</b></div>
+        <div class="ovl m" style="top:146px;left:232px;width:36px;height:36px"><b>circle</b></div>
+        <div class="ovl g" style="top:178px;left:282px;width:48px;height:26px"><b>résiduel</b></div>
+      </div>
+      <div class="pane-note">Une passe de détection unique segmente la page. Chaque polygone est recadré puis lu par le modèle correspondant à son écriture. Ce qui n'est pas du texte part vers trois passes de formes. Ce qui n'est nommable par aucune reste de l'encre résiduelle.</div>
+    </div>
+
+    <div class="pane">
+      <span class="pane-tag">02 · le .docx produit</span>
+      <div class="plan">
+        <div class="pw" style="top:26px;left:22px;width:150px;height:110px"></div>
+        <div class="pw" style="top:26px;left:172px;width:104px;height:110px"></div>
+        <div class="pw" style="top:136px;left:22px;width:254px;height:78px"></div>
+        <div class="pcirc" style="top:150px;left:236px;width:28px;height:28px"></div>
+        <div class="ptri" style="top:32px;left:296px"></div>
+        <div class="pdim" style="top:232px;left:22px;width:254px"></div>
+
+        <div class="plbl" style="top:66px;left:60px">غرفة المعيشة</div>
+        <div class="plbl" style="top:70px;left:196px">مطبخ</div>
+        <div class="plbl" style="top:160px;left:70px">Corridor — 14.80 m</div>
+        <div class="plbl en" style="top:157px;left:240px;font-size:.5rem">WC</div>
+        <div class="plbl en" style="top:52px;left:290px;font-size:.5rem">N</div>
+        <div class="plbl en" style="top:236px;left:120px;font-size:.55rem">14.80 m</div>
+        <div class="pscrawl" style="top:186px;left:288px">rev. B</div>
+
+        <div class="hnd" style="top:22px;left:18px;width:158px;height:118px"><i></i><i></i><i></i><i></i></div>
+        <div class="hnd" style="top:146px;left:232px;width:36px;height:36px"><i></i><i></i><i></i><i></i></div>
+        <div class="hnd" style="top:56px;left:54px;width:86px;height:20px"><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div class="pane-note">Chaque mur est un <code>a:prstGeom</code>, chaque mot une vraie zone de texte, la révision manuscrite une image recadrée à sa position. Les poignées bleues ne sont pas décoratives : dans Word, on saisit la pièce et on la redimensionne. Aucune capture d'écran n'a été collée.</div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ======================= 00 RÉSUMÉ ======================= -->
+<section class="sec" id="s0">
+  <span class="eyebrow">§ 00 — Résumé exécutif</span>
+  <h2>Un composant serveur-à-serveur, pas une application</h2>
+
+  <p>Le service reçoit une image — plan d'architecte, schéma technique, ou page scolaire dense en texte — et rend deux choses : un <code>.docx</code> où chaque mot et chaque forme occupe la position qu'il occupait sur la page, et un JSON <em>sidecar</em> qui décrit tout ce qui a été trouvé, avec coordonnées, confiance et état de chaque étage. Il est appelé en HTTP depuis une application .NET.</p>
+
+  <p>Trois partis pris structurent tout le reste.</p>
+
+  <ul>
+    <li><strong>L'OCR tourne en local, sur CPU.</strong> Pas de coût par page, pas de plan qui sort de la machine. C'est la contrainte qui a éliminé la moitié des moteurs candidats avant même de comparer leur qualité.</li>
+    <li><strong>Rien n'est perdu silencieusement.</strong> La géométrie reconnaissable devient une vraie forme Word ; ce qui n'est pas nommable est intégré comme raster recadré <em>à sa position</em>. Un trait qu'on ne sait pas décrire est un trait qu'on affiche quand même.</li>
+    <li><strong>Le LLM est un relecteur, jamais le lecteur.</strong> Il ne voit que les mots sous le seuil de confiance, découpés en vignettes. S'il est indisponible, le document part avec le texte OCR brut et le sidecar le dit.</li>
+  </ul>
+
+  <div class="box key">
+    <span class="bt">Le choix d'architecture qui explique le reste</span>
+    <p>Un modèle vision-langage lit mieux l'arabe que n'importe quel moteur classique — mais il ne rend <strong>ni boîtes englobantes fiables, ni confiance par mot</strong>. Or tout le produit repose sur ces deux sorties : sans boîtes, pas de reconstruction spatiale ; sans confiance, pas de surlignage, pas de relecture ciblée, pas de porte d'entrée pour le LLM. D'où la répartition : un détecteur/reconnaisseur classique fournit la structure, un VLM ne corrige que ce que le premier a lui-même déclaré douteux.</p>
+  </div>
+
+  <h4>Les six chiffres à retenir</h4>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Indicateur</th><th class="n">Mesuré</th><th>Contexte</th></tr></thead>
+      <tbody>
+        <tr><td>Page type, de bout en bout</td><td class="n">5,6 s / 82 éléments</td><td>Plan d'étage mixte AR+EN : 44 textes, 37 formes, 1 raster</td></tr>
+        <tr><td>Grande page, LLM en échec</td><td class="n">~72 s</td><td>3897×4752, 167 éléments. Était 137 s avant le plafond horloge</td></tr>
+        <tr><td>Coût par page</td><td class="n">0 €</td><td>Poids des modèles : ~31 Mo, embarqués dans l'image Docker</td></tr>
+        <tr><td>Confiance moyenne, page anglaise</td><td class="n">0,936 / 0,991</td><td>Modèle arabe vs modèle anglais dédié — voir § 09</td></tr>
+        <tr><td>Rectangles retrouvés sur un diagramme de classes</td><td class="n">0 → 11 / 11</td><td>Avant / après la passe segments. Voir § 05</td></tr>
+        <tr><td>Hauteur de ligne sous laquelle rien n'est récupérable</td><td class="n">20 px</td><td>Signalé par <code>low_resolution</code>. Voir § 11 — c'est la limite dominante</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ======================= 01 CONTRAT ======================= -->
+<section class="sec" id="s1">
+  <span class="eyebrow">§ 01 — Le contrat d'interface</span>
+  <h2>Quatre points d'entrée, et une règle de lecture du sidecar</h2>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Point d'entrée</th><th class="n">Méthode</th><th>Rôle</th></tr></thead>
+      <tbody>
+        <tr><td><code>/health</code></td><td class="n">GET</td><td>Vivacité, et si les modèles sont chargés</td></tr>
+        <tr><td><code>/process</code></td><td class="n">POST</td><td>Image → <code>.docx</code> + sidecar</td></tr>
+        <tr><td><code>/feedback</code></td><td class="n">POST</td><td>Enregistre les corrections de l'utilisateur</td></tr>
+        <tr><td><code>/docs</code></td><td class="n">GET</td><td>Swagger interactif — le chemin de test manuel recommandé</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Champs de <code>/process</code></h3>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Champ</th><th class="n">Défaut</th><th>Signification</th></tr></thead>
+      <tbody>
+        <tr><td><code>image</code></td><td class="n">requis</td><td>JPEG / PNG / TIFF / BMP, ≤ 25 Mo. <strong>WebP refusé délibérément</strong> (§ 12)</td></tr>
+        <tr><td><code>language_hint</code></td><td class="n">ar+en</td><td><code>ar+en</code> · <code>ar</code> · <code>en</code>. Détermine le routage de reconnaissance</td></tr>
+        <tr><td><code>confidence_threshold</code></td><td class="n">0.75</td><td>Sous ce score, le mot part chez le relecteur LLM et reste surligné</td></tr>
+        <tr><td><code>label_shapes</code></td><td class="n">true</td><td>Demander au modèle de nommer les formes non classées</td></tr>
+        <tr><td><code>response_format</code></td><td class="n">json</td><td><code>docx</code> rend le fichier directement, stats dans l'en-tête <code>X-Sidecar-Stats</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="box warn">
+    <span class="bt">La règle de lecture qui évite un contresens</span>
+    <p><strong>Ne jamais interpréter <code>llm_corrections: 0</code> sans lire <code>llm_status</code>.</strong> Zéro correction veut dire soit « le modèle a confirmé chaque mot », soit « le modèle n'a jamais tourné ». Les compteurs seuls ne distinguent pas les deux, et la dégradation était autrefois silencieuse.</p>
+    <p>Les états sont explicites : <code>success</code> · <code>not_attempted</code> (<code>no_flagged_words</code>, <code>not_configured</code>) · <code>failed</code> (<code>rate_limited</code>, <code>timed_out</code>, <code>invalid_model</code>, <code>empty_response</code>…). <code>empty_response</code> mérite une mention : la passerelle renvoie HTTP 200 sans complétion utilisable et met la vraie raison dans un champ <code>error</code>, pas dans le code de statut.</p>
+  </div>
+</section>
+
+<!-- ======================= 02 PIPELINE ======================= -->
+<section class="sec" id="s2">
+  <span class="eyebrow">§ 02 — Vue d'ensemble</span>
+  <h2>Sept étages, dont deux optionnels et aucun bloquant</h2>
+
+  <div class="flux">
+    <div class="st io"><b>image</b><span>jpeg / png<br>≤ 25 Mo</span></div>
+    <div class="st"><b>1 · prétrait.</b><span>2000 px, deskew<br>débruitage</span></div>
+    <div class="st"><b>2 · OCR</b><span>1 détection<br>+ N reconnaiss.</span></div>
+    <div class="st"><b>3 · formes</b><span>contours<br>+ segments</span></div>
+    <div class="st"><b>4 · mise en page</b><span>coord. relatives<br>ordre de lecture</span></div>
+    <div class="st opt"><b>5 · LLM</b><span>relecture<br>optionnelle</span></div>
+    <div class="st opt"><b>5b · libellés</b><span>nommage formes<br>optionnel</span></div>
+    <div class="st"><b>6 · Word</b><span>DrawingML<br>positionné</span></div>
+    <div class="st"><b>7 · sidecar</b><span>JSON + états</span></div>
+    <div class="st io"><b>sortie</b><span>.docx<br>+ sidecar</span></div>
+  </div>
+  <p class="cap">Orchestré par <code>pipeline/__init__.py::process_image</code>. Les deux étages ambrés peuvent échouer sans faire échouer la requête ; leur état est reporté, jamais tu.</p>
+
+  <p>Deux points d'ordonnancement ne sont pas arbitraires et méritent d'être dits, parce qu'ils ont chacun été payés par un bug :</p>
+
+  <ul>
+    <li><strong>L'OCR passe avant la détection de formes</strong>, pour que ses boîtes de mots servent de masque. Sans ce masque, chaque grappe de glyphes revient comme une forme « complexe » et le mot se retrouve <em>deux fois</em> dans le document : une fois comme texte, une fois gravé dans l'image recadrée.</li>
+    <li><strong>Le rehaussement de contraste (CLAHE) n'est appliqué qu'à la détection de formes</strong>, pas à l'OCR. Les deux étages veulent l'inverse l'un de l'autre sur la même page. Mesuré : rehausser fait perdre de la précision OCR (0,9066 → 0,8955) mais fait passer de 19 à 29 formes trouvées — dont les cinq cercles qui, sur cette fiche, portent les valeurs des pièces de monnaie. CLAHE vivait dans <code>preprocess()</code> et les deux le subissaient ; c'est maintenant un embranchement, pas une chaîne.</li>
+  </ul>
+</section>
+
+<!-- ======================= 03 PRÉTRAITEMENT ======================= -->
+<section class="sec" id="s3">
+  <span class="eyebrow">§ 03 — Étage 1</span>
+  <h2>Prétraitement : trois réglages, trois mesures</h2>
+
+  <ol class="steps">
+    <li>
+      <h4>Réduction à 2000 px sur le plus grand côté</h4>
+      <p>Contre-intuitif : descendre plus bas ne fait pas gagner de temps. Le temps « mise en page + OCR » est <strong>plat de 1000 à 2000 px</strong>, parce que PaddleOCR travaille à une résolution interne largement fixe. Le seul palier où la réduction fait gagner quelque chose est 800 px — et là, <strong>45 % des mots disparaissent</strong>. 2000 px reste.</p>
+    </li>
+    <li>
+      <h4>Redressement plafonné à 15°</h4>
+      <p>Le redressement refuse de tourner au-delà de 15°. Raison précise : une ligne de coupe diagonale sur un plan fait rapporter ~45° au détecteur d'inclinaison, et appliquer cette rotation détruit la page. Le plafond n'est pas de la prudence générique, c'est une réponse à un cas réel du corpus.</p>
+    </li>
+    <li>
+      <h4>Débruitage, puis contraste — mais pour un seul consommateur</h4>
+      <p>Voir § 02. <code>enhance_contrast()</code> est appelé explicitement au moment de la détection de formes, et ne touche jamais l'image envoyée à l'OCR. CLAHE ne redimensionne pas, donc les coordonnées des formes restent dans le même espace que les boîtes de mots — c'est ce qui rend l'embranchement possible sans recalage.</p>
+    </li>
+  </ol>
+
+  <div class="box">
+    <span class="bt">Ce que le prétraitement ne peut pas faire</span>
+    <p>Il ne crée pas d'information. Sur un scan à ~45 DPI (lignes de 14–16 px), agrandir jusqu'à 1500 px double le rappel — 157 → 317 caractères arabes, confiance 0,651 → 0,744, pour +0,42 s — mais <strong>les erreurs de points survivent à l'identique à 1×, 2×, 3× et 4×</strong>. Le suréchantillonnage récupère des caractères manqués ; il ne corrige aucun caractère mal lu. Voir § 11.</p>
+  </div>
+</section>
+
+<!-- ======================= 04 OCR ======================= -->
+<section class="sec" id="s4">
+  <span class="eyebrow">§ 04 — Étage 2</span>
+  <h2>Une passe de détection, puis un routage par écriture</h2>
+
+  <p>PaddleOCR 3.7 est utilisé en pilotant <strong>trois modèles directement</strong>, pas via un pipeline empaqueté. La segmentation est faite une seule fois — elle est agnostique à la langue — puis chaque polygone détecté est recadré en perspective et lu séparément.</p>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Modèle</th><th>Rôle</th><th>Quand il tourne</th></tr></thead>
+      <tbody>
+        <tr><td><code>PP-OCRv6_tiny_det</code></td><td>Détection</td><td>Une fois par page. Agnostique à l'écriture</td></tr>
+        <tr><td><code>PP-OCRv6_small_rec</code></td><td>Reconnaissance latine</td><td>Sur chaque recadrage</td></tr>
+        <tr><td><code>arabic_PP-OCRv5_mobile_rec</code></td><td>Reconnaissance arabe</td><td>Seulement là où la confiance latine est &lt; 0,90 — mesuré : 2 recadrages sur 89 (diagramme de classes), 5 sur 12 (plan d'étage)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="box warn">
+    <span class="bt">Le gagnant est choisi par écriture, pas par confiance</span>
+    <p>Le modèle arabe massacre le latin <em>tout en lui attribuant un score élevé</em>. Arbitrer sur la confiance choisit donc régulièrement la mauvaise lecture. La règle est explicite : le modèle arabe ne l'emporte que s'il a effectivement renvoyé de l'arabe.</p>
+  </div>
+
+  <p>Cette architecture a remplacé <strong>deux passes complètes détection+reconnaissance</strong> dont les segmentations divergentes devaient être réconciliées par une union-find sur recouvrement de boîtes. Avec une segmentation unique il n'y a rien à fusionner, et ce code a disparu.</p>
+
+  <div class="box key">
+    <span class="bt">Pourquoi le routage par écriture reste obligatoire en 2026</span>
+    <p><strong>PP-OCRv6 ne fait pas l'arabe.</strong> Ses cinquante langues sont le chinois, l'anglais, le japonais et 46 langues à écriture latine. L'arabe reste servi par un modèle de génération v5. Et PaddleOCR 3.7 n'expose que <strong>deux</strong> modèles de reconnaissance arabe, tous deux de classe <em>mobile</em> — <code>arabic_PP-OCRv3_mobile_rec</code> et <code>arabic_PP-OCRv5_mobile_rec</code>. Il n'existe pas de modèle arabe de classe <em>server</em> : « monter en gamme à l'intérieur de Paddle » est une porte fermée. Le seul chemin au-delà du plafond mobile est une autre famille de modèles.</p>
+  </div>
+</section>
+
+<!-- ======================= 05 FORMES ======================= -->
+<section class="sec" id="s5">
+  <span class="eyebrow">§ 05 — Étage 3</span>
+  <h2>Détection de formes : trois passes, parce qu'un contour ne sait pas représenter un trait</h2>
+
+  <p>C'est l'étage qui a demandé le plus de reprises, pour une raison qui n'est visible qu'une fois qu'on la nomme.</p>
+
+  <div class="box warn">
+    <span class="bt">L'erreur de conception initiale</span>
+    <p><code>findContours</code> trace des <strong>frontières de régions</strong>. Il ne peut donc pas, structurellement, représenter un trait. Une boîte soudée aux connecteurs qui la touchent devient un seul contour en forme de serpent, de solidité ~0,001, dans lequel il n'y a aucun rectangle à trouver. Avant la passe segments, le diagramme de classes rendait <strong>zéro</strong> rectangle. Le même défaut expliquait le bug du <code>minAreaRect</code> à petit côté nul.</p>
+  </div>
+
+  <ol class="steps">
+    <li>
+      <h4>Passe régions — contours fermés et blobs pleins</h4>
+      <p>Les contours de solidité ≥ 0,60 sont classés par nombre de sommets, étendue, circularité et solidité → <code>circle · ellipse · triangle · rect · square</code>. Seuillage d'Otsu plutôt qu'un seuil fixe, les dessins étant bimodaux. <code>RETR_CCOMP</code> plutôt que <code>RETR_EXTERNAL</code> : ce dernier jetait tout ce qui se trouvait à l'intérieur d'un contour extérieur — murs intérieurs, mobilier, équipements.</p>
+    </li>
+    <li>
+      <h4>Passe segments — <code>cv2.ximgproc.createEdgeDrawing</code></h4>
+      <p>Les segments colinéaires sont fusionnés, puis les rectangles assemblés à partir de 4-cycles de paires parallèles. Résultat sur le diagramme de classes : <strong>11 rectangles sur 11</strong>, contre zéro avant. Ce qui reste devient des polylignes ouvertes, émises comme de vraies formes libres DrawingML (<code>a:custGeom</code>) et non comme des images.</p>
+    </li>
+    <li>
+      <h4>Passe résiduelle — le filet de sécurité</h4>
+      <p>Tout ce qui subsiste est dilaté, groupé en composantes connexes et émis en images recadrées positionnées. Le raster est réservé à l'encre qui n'est véritablement pas nommable : sur le diagramme de classes, la répartition est passée de <strong>54 rasters / 6 vecteurs</strong> à <strong>15 / 74</strong>.</p>
+    </li>
+  </ol>
+
+  <h3>Le texte n'est jamais dupliqué dans une forme</h3>
+  <p>Les régions de texte sont masquées de l'image dont on <em>découpe</em> les recadrages, pas seulement de celle où l'on <em>cherche</em> les contours. Sans cela, une boîte contenant une étiquette emportait cette étiquette dans l'image intégrée, et le document affichait les mots deux fois.</p>
+  <p>La zone effacée est remplie avec la <strong>couleur médiane d'un fin anneau juste à l'extérieur</strong>, pour qu'une boîte de couleur reste de sa couleur au lieu d'être perforée en blanc. Ce masquage perce aussi des trous que <code>RETR_CCOMP</code> rapporte comme contours imbriqués — ils sont reconnus comme auto-infligés et ignorés, sans quoi chaque mot dans une boîte remplie revenait en rectangle fantôme.</p>
+</section>
+
+<!-- ======================= 06 MISE EN PAGE ======================= -->
+<section class="sec" id="s6">
+  <span class="eyebrow">§ 06 — Étage 4</span>
+  <h2>Mise en page et bidirectionnalité : la correction la plus dangereuse est celle qu'on applique deux fois</h2>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Mécanisme</th><th>Ce qu'il corrige</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Coordonnées relatives</strong></td><td>Chaque boîte est une fraction de la taille de page, donc elle survit à la réduction du prétraitement</td></tr>
+        <tr><td><strong>Letterboxing</strong></td><td>Le rapport d'aspect source est inscrit dans la page et centré. Mapper <code>x</code> par la largeur et <code>y</code> par la hauteur indépendamment étirait le dessin — les cercles sortaient en ellipses</td></tr>
+        <tr><td><strong>Bandes de profondeur</strong></td><td>Le texte est ancré dans une bande <code>relativeHeight</code> supérieure aux graphiques. Tous les ancrages partageaient une seule valeur : Word retombait sur l'ordre du document et peignait les formes par-dessus le texte</td></tr>
+        <tr><td><strong>Police dimensionnée par sa boîte</strong></td><td>La taille dérive de la hauteur de boîte, pour que le texte remplisse l'espace mesuré par l'OCR au lieu d'être rogné par lui</td></tr>
+        <tr><td><strong>Association mot ↔ forme</strong></td><td>Chaque mot porte l'identifiant de la plus petite forme qui le contient (<code>container_shape_id</code>) — livré, désactivé par défaut, voir § 07</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="box key">
+    <span class="bt">Aucun réordonnancement bidirectionnel — et c'est un choix, pas un oubli</span>
+    <p><code>arabic_PP-OCRv5_mobile_rec</code> renvoie l'ordre <strong>logique</strong> (l'ordre de stockage Unicode), et par phrases entières. C'est exactement ce que veulent le sidecar et Word. PP-OCRv4 ne le faisait pas : il émettait l'ordre visuel, et <code>utils.bidi.to_logical_order</code> l'inversait pour compenser.</p>
+    <p>Cette fonction a été <strong>supprimée</strong>. L'appliquer aujourd'hui serait une seconde correction sur une chaîne déjà correcte, et expédierait de l'arabe inversé dans chaque document. Le mode de défaillance est invisible — de l'arabe inversé s'affiche toujours comme de l'arabe et passe toujours <code>is_arabic()</code> — il est donc verrouillé par un test au niveau des points de code, pas par une vérification visuelle.</p>
+  </div>
+
+  <p>Ce qui subsiste de traitement RTL : les paragraphes Word reçoivent <code>&lt;w:bidi/&gt;</code>, l'ordre de lecture groupe les mots en lignes et trie chaque ligne dans <em>sa propre</em> direction, et la langue de chaque élément est déduite par ratio de caractères (<code>arabic</code> / <code>english</code> / <code>mixed</code>).</p>
+</section>
+
+<!-- ======================= 07 LLM ======================= -->
+<section class="sec" id="s7">
+  <span class="eyebrow">§ 07 — Étage 5</span>
+  <h2>Le relecteur LLM : une porte de confiance, des vignettes, et un plafond horloge</h2>
+
+  <p>Seuls les mots sous le seuil sont envoyés, sous forme de <strong>recadrages rembourrés et agrandis</strong>, un par mot. Envoyer la page entière a échoué complètement : le modèle n'arrivait pas à localiser un petit mot dans une grande image. Les vignettes ont réglé cela d'un coup.</p>
+
+  <h3>La machinerie de fiabilité</h3>
+  <p>Chaque ligne du tableau ci-dessous est la réponse à une panne observée, pas une précaution théorique.</p>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Mécanisme</th><th>La panne qu'il traite</th></tr></thead>
+      <tbody>
+        <tr><td>Chaîne de modèles de repli</td><td>Les modèles gratuits limitent le débit, sont retirés, et rendent du JSON malformé</td></tr>
+        <tr><td><strong>Plafond horloge dur par tentative</strong></td><td>Des appels renvoient HTTP 200 puis n'envoient jamais de corps. <code>httpx</code> n'expose que des délais <em>par phase</em> — connexion, lecture, écriture — jamais un délai total, et son délai de lecture se réarme à chaque octet reçu. Un fournisseur qui distille des octets de maintien peut tenir une lecture ouverte indéfiniment ; seul un <code>thread.join(timeout=)</code> coupe réellement</td></tr>
+        <tr><td>Un budget partagé par les deux étages LLM</td><td>Chacun avait le sien, ce qui doublait l'attente au pire cas</td></tr>
+        <tr><td>Répartition 50/50 du budget</td><td>La correction de mots consommait tout ; le nommage des formes revenait <code>timed_out</code> sur 2 exécutions sur 3</td></tr>
+        <tr><td>Saut des modèles en échec permanent</td><td>Un 404 « aucun point d'entrée ne supporte l'image » ne peut pas se rétablir dans la requête</td></tr>
+        <tr><td>Déduplication par hachage perceptuel (dHash)</td><td>Un dessin répète le même symbole des dizaines de fois : le nommer une seule fois</td></tr>
+        <tr><td>Réponses indexées par clé</td><td>Deux étiquettes identiques sur une page doivent se corriger indépendamment</td></tr>
+        <tr><td><code>llm_status</code> dans le sidecar</td><td>La dégradation était silencieuse : l'appelant ne pouvait pas savoir que la correction n'avait jamais tourné</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="box warn">
+    <span class="bt">La cicatrice : une hallucination provoquée par notre propre invite</span>
+    <p>Un glossaire arabe inconditionnel, posé au niveau du module dans l'invite système, a conduit le modèle à « corriger » l'anglais <code>'a'</code> en <span class="ar-inline">غرفة</span> avec une certitude de <strong>1,00</strong> — sur un diagramme UML <em>entièrement</em> en anglais. Le modèle recopiait l'invite au lieu de lire la vignette. Deux autres du même lot : <code>'er١' → '١م'</code> à 0,71, <code>'Y 1..' → '١..'</code> à 0,69.</p>
+    <p>Deux parades, en ceinture et bretelles. Côté invite : le glossaire est désormais conditionné à l'écriture détectée du lot. Côté réponse : un garde-fou rejette une correction qui introduit une écriture absente du lot — délibérément <strong>asymétrique</strong>, il ne bloque que l'arabe surgissant dans un lot classé entièrement anglais, jamais l'inverse, parce qu'un chiffre latin dans une phrase arabe est légitime et courant.</p>
+  </div>
+
+  <h3>Contexte mot ↔ forme <span class="pill p-off">livré, désactivé</span></h3>
+  <p>L'idée : donner au mot douteux le texte confiant de ses voisins dans la même boîte. Mesuré sur le document de test, <strong>1 mot signalé sur 4 seulement</strong> avait un voisin confiant dans sa boîte — les autres sont des étiquettes de cardinalité qui, par construction, vivent en dehors de toute boîte. Pire : l'activer faisait rendre <em>aucune correction du tout</em> au modèle 12B configuré, sur 2 exécutions sur 3. Cela recoupe des travaux publiés : le contexte ajouté aide les modèles 27B/70B et fait <em>perdre</em> du contenu aux plus petits. Conservé pour un modèle plus gros, <code>SHAPE_CONTEXT_ENABLED=false</code> en attendant.</p>
+
+  <div class="box">
+    <span class="bt">Le contrat non négociable</span>
+    <p>Un mot sous le seuil reste <strong>surligné, que le modèle réponde ou non</strong>. Le LLM peut améliorer une lecture ; il ne peut jamais transformer un mot incertain en mot certifié. Rien ne part silencieusement non vérifié.</p>
+  </div>
+</section>
+
+<!-- ======================= 08 SORTIE ======================= -->
+<section class="sec" id="s8">
+  <span class="eyebrow">§ 08 — Étages 6 et 7</span>
+  <h2>Le document Word, et le sidecar qui dit la vérité sur lui</h2>
+
+  <p>Le <code>.docx</code> est construit avec python-docx <em>et du DrawingML écrit à la main</em>. La raison est simple : python-docx ne sait pas produire d'ancrages flottants, or tout le produit repose sur du positionnement absolu. Le XML est donc écrit directement.</p>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Type d'élément</th><th>Rendu Word</th><th>Pourquoi</th></tr></thead>
+      <tbody>
+        <tr><td><code>TextElement</code></td><td>Zone de texte flottante</td><td>Sélectionnable, éditable, avec <code>&lt;w:bidi/&gt;</code> sur le paragraphe</td></tr>
+        <tr><td><code>SimpleShapeElement</code></td><td><code>a:prstGeom</code> — géométrie prédéfinie</td><td>Contour seul : le style par défaut de Word est un remplissage bleu plein, qui masquerait le texte dessous</td></tr>
+        <tr><td><code>PolylineShapeElement</code></td><td><code>a:custGeom</code> — forme libre</td><td>Il n'existe pas de géométrie prédéfinie « chemin arbitraire ». Un connecteur reste vectoriel plutôt que de devenir une image</td></tr>
+        <tr><td><code>ComplexShapeElement</code></td><td>Image recadrée positionnée</td><td>Le repli assumé. Porte un <code>llm_label</code> quand le nommage a fonctionné</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Le sidecar reporte la taille de page <em>originale</em> de l'appelant. Les boîtes étant relatives, elles restent valides malgré la réduction du prétraitement — c'est ce qui permet à l'appelant .NET de recaler sur l'image qu'il détient, pas sur celle qu'on a traitée.</p>
+
+  <pre><span class="cm">// extrait de sidecar — un mot corrigé, et une forme nommée</span>
+{ <span class="ky">"id"</span>: <span class="st">"el_014"</span>, <span class="ky">"type"</span>: <span class="st">"text"</span>,
+  <span class="ky">"bbox"</span>: { <span class="ky">"x"</span>: 0.312, <span class="ky">"y"</span>: 0.188, <span class="ky">"w"</span>: 0.104, <span class="ky">"h"</span>: 0.021 },
+  <span class="ky">"content"</span>: <span class="st">"غرفة المعيشة"</span>, <span class="ky">"language"</span>: <span class="st">"arabic"</span>,
+  <span class="ky">"confidence"</span>: 0.71, <span class="ky">"highlight"</span>: <span class="st">"yellow"</span>,
+  <span class="ky">"llm_correction"</span>: { <span class="ky">"original"</span>: <span class="st">"غرفه المعيشه"</span>,
+                       <span class="ky">"corrected"</span>: <span class="st">"غرفة المعيشة"</span>, <span class="ky">"certainty"</span>: 0.88 } }
+
+<span class="ky">"stats"</span>: { <span class="ky">"total_elements"</span>: 82, <span class="ky">"text_elements"</span>: 44,
+           <span class="ky">"llm_corrections"</span>: 5, <span class="ky">"processing_time_ms"</span>: 5600,
+           <span class="ky">"quality_score"</span>: 0.87, <span class="ky">"low_resolution"</span>: <span class="kw">false</span>,
+           <span class="ky">"llm_status"</span>: { <span class="ky">"state"</span>: <span class="st">"success"</span>, <span class="ky">"reason"</span>: <span class="kw">null</span> },
+           <span class="ky">"shape_label_status"</span>: { <span class="ky">"state"</span>: <span class="st">"failed"</span>,
+                                  <span class="ky">"reason"</span>: <span class="st">"rate_limited"</span> } }</pre>
+  <p class="cap">Les deux étages LLM rapportent leur état séparément : ici la correction a réussi et le nommage a été limité en débit. Un seul champ agrégé aurait masqué la moitié de l'information.</p>
+</section>
+
+<!-- ======================= 09 MESURES ======================= -->
+<section class="sec" id="s9">
+  <span class="eyebrow">§ 09 — Mesures</span>
+  <h2>Tout vient du conteneur en marche, CPU seul</h2>
+
+  <h3>Latence</h3>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Scénario</th><th class="n">Avant</th><th class="n">Maintenant</th></tr></thead>
+      <tbody>
+        <tr><td>Grande page (3897×4752, 167 éléments), LLM en échec</td><td class="n">137 s</td><td class="n"><strong>~72 s</strong></td></tr>
+        <tr><td>Petite page</td><td class="n">14,9 s</td><td class="n"><strong>~5 s</strong></td></tr>
+        <tr><td><code>/health</code> pendant un <code>/process</code> chargé</td><td class="n">2,72 s</td><td class="n"><strong>6–11 ms</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Le pire cas est désormais borné par le budget LLM, plus par la durée de vie d'une socket bloquée.</p>
+
+  <h4>Où passe le temps hors LLM — grande page, ~12,1 s</h4>
+  <div class="bars" role="img" aria-label="Répartition du temps hors LLM">
+    <div class="bar-row"><span class="lab">OCR</span><span class="bar-track"><span class="bar-fill" style="width:100%"></span></span><span class="val">6,3 s</span></div>
+    <div class="bar-row"><span class="lab">segmentation</span><span class="bar-track"><span class="bar-fill" style="width:81%"></span></span><span class="val">5,1 s</span></div>
+    <div class="bar-row"><span class="lab">prétraitement</span><span class="bar-track"><span class="bar-fill" style="width:8%"></span></span><span class="val">0,5 s</span></div>
+    <div class="bar-row"><span class="lab">tout le reste</span><span class="bar-track"><span class="bar-fill" style="width:3%"></span></span><span class="val">&lt; 0,2 s</span></div>
+  </div>
+
+  <h3>Modèle arabe contre modèle anglais, sur une page 100 % anglaise</h3>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Critère</th><th class="n">ar+en (modèle arabe)</th><th class="n">en (modèle anglais)</th></tr></thead>
+      <tbody>
+        <tr><td>Confiance moyenne</td><td class="n">0,936</td><td class="n"><strong>0,991</strong></td></tr>
+        <tr><td>Mots sous le seuil</td><td class="n">4</td><td class="n"><strong>1</strong></td></tr>
+        <tr><td>Jetons contenant des chiffres arabo-indiens parasites</td><td class="n">1</td><td class="n"><strong>0</strong></td></tr>
+        <tr><td>Durée OCR</td><td class="n">8,1 s</td><td class="n"><strong>5,4 s</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Lectures récupérées par le modèle anglais : <code>Icreated → +created_at</code>, <code>window._+tolerance → +tolerance_window_days</code>, <code>er١ → user</code>. Mais le même modèle anglais sur un dessin <em>arabe</em> ne trouve que <strong>8 mots sur 21</strong> : il ne lit pas l'arabe du tout. D'où le défaut inchangé, et le routage par écriture comme suite logique.</p>
+
+  <h3>Effet des passes de formes</h3>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Mesure, diagramme de classes</th><th class="n">Avant</th><th class="n">Après</th></tr></thead>
+      <tbody>
+        <tr><td>Rectangles retrouvés</td><td class="n">0</td><td class="n"><strong>11 / 11</strong></td></tr>
+        <tr><td>Rasters / vecteurs</td><td class="n">54 / 6</td><td class="n"><strong>15 / 74</strong></td></tr>
+        <tr><td>Formes trouvées avec CLAHE (test2)</td><td class="n">19</td><td class="n"><strong>29</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ======================= 10 DÉCISIONS FERMÉES ======================= -->
+<section class="sec" id="s10">
+  <span class="eyebrow">§ 10 — Décisions fermées</span>
+  <h2>Ce qui a été essayé, écarté, et n'a pas à être ré-essayé</h2>
+
+  <p>Chaque ligne représente du temps déjà dépensé. Les rouvrir demande une raison neuve, pas une intuition.</p>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Piste</th><th class="n">Verdict</th><th>Motif</th></tr></thead>
+      <tbody>
+        <tr><td>Tesseract (+ pack arabe)</td><td class="n"><span class="pill p-hard">écarté</span></td><td>CER ~0,54 sur l'arabe. Hors-jeu, quel que soit le réglage</td></tr>
+        <tr><td>Surya</td><td class="n"><span class="pill p-hard">écarté</span></td><td>CER 4,95 sur KITAB-Bench — le pire testé — <em>et</em> licence OpenRAIL-M avec plafond de revenus et clause de non-concurrence</td></tr>
+        <tr><td>MinerU</td><td class="n"><span class="pill p-hard">écarté</span></td><td>AGPL-3.0, incompatible avec un composant intégré chez un client</td></tr>
+        <tr><td>Ultralytics YOLO</td><td class="n"><span class="pill p-hard">écarté</span></td><td>AGPL-3.0, et aucun poids pré-entraîné crédible pour des symboles d'architecture</td></tr>
+        <tr><td>potrace / VTracer</td><td class="n"><span class="pill p-hard">écarté</span></td><td>Traceurs de contours : mauvais type de sortie. LIVE / DiffVG : 16 s à 5 h par image</td></tr>
+        <tr><td>VLM comme OCR principal</td><td class="n"><span class="pill p-hard">écarté</span></td><td>L'écart est dans la <em>localisation</em> : Hmean détection 86,2 % pour PP-OCRv6 contre 46,8 % et 38,3 % pour les VLM généralistes testés. Le pipeline entier est bâti sur la reconstruction spatiale à partir de boîtes</td></tr>
+        <tr><td>PP-OCRv6 pour l'arabe</td><td class="n"><span class="pill p-hard">impossible</span></td><td>Pas d'arabe dans ses 50 langues. Voir § 04</td></tr>
+        <tr><td>Modèle arabe de classe <em>server</em></td><td class="n"><span class="pill p-hard">inexistant</span></td><td>Vérifié en listant les configurations paddlex, pas dans la documentation</td></tr>
+        <tr><td>Remplacer la CV classique pour les formes</td><td class="n"><span class="pill p-ok">résolu autrement</span></td><td>Le bon primitif était un détecteur de segments, pas un autre modèle. Un assembleur LSD non réglé retrouvait déjà 11 rectangles sur 14 en 167 ms CPU</td></tr>
+        <tr><td>Segmentation de mise en page PP-Structure</td><td class="n"><span class="pill p-hard">supprimé</span></td><td>Rendait exactement une région, de type « figure », sur les deux images de test : la liste de régions de texte produite était toujours vide. Coût : 5,27 s et 1,15 s, plus un troisième jeu de poids dans l'image, pour rien</td></tr>
+        <tr><td>Transcription automatique de l'arabe manuscrit</td><td class="n"><span class="pill p-mid">hors périmètre</span></td><td>Rien de déployable sur CPU en 2026. Ces régions reviennent à faible confiance et surlignées, plutôt que devinées</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="box">
+    <span class="bt">Le coût n'est pas la contrainte — la latence l'est</span>
+    <p>Chaque candidat viable est local et gratuit. À ~5 s de CPU par image, le coût de traitement est de l'ordre de 0,0001 € — un ordre de grandeur <em>sous</em> le plancher de 0,001 € du cahier des charges. Arrêter d'échanger de la latence contre un coût qui n'est pas dépensé.</p>
+  </div>
+</section>
+
+<!-- ======================= 11 LIMITES ======================= -->
+<section class="sec" id="s11">
+  <span class="eyebrow">§ 11 — Limites et défauts ouverts</span>
+  <h2>Ce qui ne marche pas, dit sans adoucissement</h2>
+
+  <div class="box key">
+    <span class="bt">Le défaut le plus destructeur — corrigé, mais non vérifié</span>
+    <p><strong><code>arabic_PP-OCRv5_mobile_rec</code> supprime silencieusement les chiffres latins insérés au milieu d'une ligne arabe</strong>, en laissant une double espace là où le nombre se trouvait. Sur la fiche de mathématiques de test : <code>27250</code>, <code>8500</code> et <code>3240</code> tous perdus ; <code>43500</code> ne survivait que parce qu'il constitue son propre recadrage. Les chiffres sont <em>à l'intérieur</em> du polygone détecté et l'arabe environnant se lit correctement : défaut de décodeur, immunisé à 45 variantes de prétraitement et 23 configurations de détection.</p>
+    <p><strong>Corrigé</strong> par <code>_recover_dropped_digits</code> / <code>_splice_digits</code> (<code>pipeline/ocr.py</code>). <code>arabic_PP-OCRv3_mobile_rec</code> — la génération précédente — <em>émet</em> ces chiffres tout en étant plus faible sur l'arabe (0,8924 contre 0,9145). Il sert donc de <strong>donneur de chiffres</strong> et rien d'autre : seuls les recadrages dont la lecture retenue est arabe sont relus, l'alignement <code>difflib</code> greffe les suites de chiffres absentes, et aucun texte arabe du donneur n'est jamais conservé. Une page sans arabe ne paie rien.</p>
+    <p><strong>Ce qui reste ouvert, c'est la vérification.</strong> La greffe est au mieux-effort : elle abandonne sous 0,5 de similarité, et n'insère que les suites absentes du texte principal. Rien dans le sidecar ne dit « ici les deux lecteurs ont divergé sur un nombre ». L'appelant .NET ne peut donc pas forcer une relecture humaine sur exactement les lignes qui le méritent. C'est l'objet de la première étape du § 13.</p>
+    <p class="cap" style="margin:.6rem 0 0">Nuance pour qui rédige le contrôle qualité : le mode de défaillance est une <strong>suppression</strong>, pas l'inversion bidirectionnelle qu'on anticipe habituellement. Un contrôle qui compare des nombres entre deux moteurs ne voit rien — il n'y a pas de nombre à comparer. Il doit porter sur la <em>divergence</em>, pas seulement sur les valeurs.</p>
+  </div>
+
+  <div class="box warn">
+    <span class="bt">La limite dominante : la résolution d'entrée, avant le modèle</span>
+    <p>Sur un scan de 375×533 (~45 DPI, lignes de 14–16 px), <strong>chaque erreur de reconnaissance était une erreur de point</strong> : <span class="ar-inline">اللقب→اللفب</span>, <span class="ar-inline">الخاصة→الفاصة</span>, <span class="ar-inline">العائلات→العانلات</span>. Les lettres arabes se distinguent par des points de 1 à 2 px à cette taille : ils ne sont pas échantillonnés du tout, et la lecture est en partie de la devinette quelle que soit la confiance affichée.</p>
+    <p>Confirmation indépendante, obtenue en soumettant la même page à un modèle document de 3,3 milliards de paramètres à l'état de l'art : il commet <strong>exactement les mêmes erreurs de point</strong> (<span class="ar-inline">المغازة→المفازة</span>, <span class="ar-inline">تمثيل→تمشيل</span>). Diagnostiquer la résolution avant d'accuser le modèle. Le service <em>signale</em> plutôt que de deviner : <code>low_resolution: true</code> dès que la ligne médiane passe sous 20 px.</p>
+  </div>
+
+  <h3>Les autres écarts, par ordre d'importance</h3>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Écart</th><th class="n">État</th><th>Effet réel</th></tr></thead>
+      <tbody>
+        <tr><td>Qualité de correction plafonnée par l'offre LLM gratuite</td><td class="n"><span class="pill p-mid">contourné</span></td><td>Les quotas sont journaliers et les modèles gratuits rendent une certitude élevée sur des réponses fausses. Les mots douteux restent surlignés dans tous les cas. Une clé payante est la correction</td></tr>
+        <tr><td>Boucle de retour d'expérience</td><td class="n"><span class="pill p-mid">à moitié</span></td><td>Les corrections sont bien stockées ; <code>get_few_shot_examples()</code> existe mais n'est jamais appelé</td></tr>
+        <tr><td>Validation de <code>/feedback</code></td><td class="n"><span class="pill p-mid">lâche</span></td><td>Accepte n'importe quel <code>document_id</code> — pas de contrôle de clé étrangère</td></tr>
+        <tr><td>Contexte mot ↔ forme</td><td class="n"><span class="pill p-off">désactivé</span></td><td>Nécessite un modèle au-dessus du palier 8–13 B. Voir § 07</td></tr>
+        <tr><td>Dessin mixte arabe + anglais</td><td class="n"><span class="pill p-hard">non testé</span></td><td>Aucun fichier de test n'existe — c'est précisément le cas qui trancherait le routage par écriture</td></tr>
+        <tr><td>Marques de cote (traits de repère)</td><td class="n"><span class="pill p-hard">manqué</span></td><td>Non récupérées comme formes de ligne sur la cote <code>14.80 m</code></td></tr>
+        <tr><td>Espace perdu au point final</td><td class="n"><span class="pill p-hard">manqué</span></td><td><span class="ar-inline">التنفيذ. سماكة</span> → <span class="ar-inline">التنفيذسماكة</span> sur deux phrases</td></tr>
+        <tr><td>Instabilité de <code>import paddle</code></td><td class="n"><span class="pill p-off">amont</span></td><td>Problème ouvert en amont ; le serveur n'est pas affecté une fois démarré</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ======================= 12 DURCISSEMENT ======================= -->
+<section class="sec" id="s12">
+  <span class="eyebrow">§ 12 — Durcissement et exploitation</span>
+  <h2>Les gardes, et la contrainte qui casse le service si on y touche</h2>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Garde</th><th>Ce qu'il empêche</th></tr></thead>
+      <tbody>
+        <tr><td><code>asyncio.Semaphore(1)</code> + déport en pool de threads</td><td>Un envoi qui gèle le service. Les prédicteurs PaddleOCR ne sont pas sûrs en multithread</td></tr>
+        <tr><td>Refus du WebP au niveau des octets magiques</td><td>CVE-2023-4863. Corrigé en amont dans opencv 4.8.1.78 — donc défense en profondeur aujourd'hui, plus la mitigation qu'il était sous l'ancienne épingle 4.6.0.66</td></tr>
+        <tr><td>Plafond de 200 mégapixels <em>décodés</em></td><td>Bombes de décompression : le plafond de 25 Mo ne borne que le fichier <em>encodé</em></td></tr>
+        <tr><td>500 générique + journalisation côté serveur</td><td>Fuite de traces d'exécution vers l'appelant</td></tr>
+        <tr><td>Panne de base tolérée au démarrage</td><td>Postgres n'est nécessaire qu'à <code>/feedback</code>, jamais à l'OCR</td></tr>
+        <tr><td>Niveau de journalisation réaffirmé après chaque exécution</td><td>L'import de PaddleOCR met silencieusement le logger racine à WARNING, ce qui tuait toute la journalisation après la première requête</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="box warn">
+    <span class="bt">La contrainte porteuse : <code>enable_mkldnn=False</code></span>
+    <p>Paddle 3.3.1 d'origine meurt sur un CPU sans AVX-512 avec un <code>NotImplementedError</code> PIR/oneDNN. Ni <code>ir_optim=False</code> ni <code>FLAGS_enable_pir_api=0</code> n'y changent quoi que ce soit, et la variable d'environnement <code>FLAGS_use_mkldnn=0</code> est <strong>silencieusement ignorée</strong> par paddle 3.x — le réglage doit être un argument de constructeur. Il est passé à l'unique site de construction du prédicteur, précisément pour qu'on ne puisse pas l'oublier.</p>
+  </div>
+
+  <p>Conteneur : Docker Compose, utilisateur non-root en uid 1000, poids de modèles cuits dans l'image (~31 Mo). <strong>Ne jamais faire <code>docker compose down -v</code></strong> — cela supprime le volume Postgres. Les tests tournent contre les dépendances épinglées de l'image, pas contre un environnement virtuel local ; 157 tests couvrent chaque étage.</p>
+</section>
+
+<!-- ======================= 13 ROADMAP ======================= -->
+<section class="sec" id="s13">
+  <span class="eyebrow">§ 13 — Feuille de route</span>
+  <h2>Par valeur décroissante, pas par ordre d'apparition</h2>
+
+  <ol class="steps">
+    <li>
+      <h4>Un banc de mesure avec vérité terrain <span class="pill p-hard">préalable à tout</span></h4>
+      <p>Le projet n'a aujourd'hui <strong>aucune mesure d'exactitude</strong> : uniquement des scores de confiance, qui sont l'avis du modèle sur lui-même. Chaque réglage cité dans ce rapport a été arbitré à la main, une fois, sur deux images. Sans banc, aucune des étapes suivantes n'est jugeable — et une régression est invisible. CER, WER, et le taux d'exactitude numérique, sur une dizaine de pages transcrites. C'est le meilleur investissement du projet, et il est indépendant de tout le reste.</p>
+    </li>
+    <li>
+      <h4>Publier la divergence numérique dans le sidecar</h4>
+      <p>La greffe de chiffres (§ 11) corrige mais ne signale pas. Le donneur v3 sait déjà, à chaque ligne arabe, s'il a vu un nombre que v5 avait perdu — cette information est calculée puis jetée. L'exposer par élément permet à l'appelant .NET de forcer une relecture humaine sur exactement les lignes qui la méritent, au lieu de faire confiance en bloc.</p>
+    </li>
+    <li>
+      <h4>Isoler la colonne de notation en marge</h4>
+      <p>L'ordre de lecture groupe les mots en lignes par centre vertical, puis trie chaque ligne. Sur une page d'examen, les petites cases de notation en bordure partagent leur ordonnée avec le corps du texte : elles s'insèrent donc <em>au milieu</em> des phrases. Le périmètre du service a été élargi aux pages scolaires denses, mais le reconstructeur a été conçu pour des plans. Un détecteur de colonne étroite en bordure suffit.</p>
+    </li>
+    <li>
+      <h4>Injecter le contexte de la phrase dans l'invite de correction</h4>
+      <p>Le relecteur ne reçoit qu'une vignette par mot et son score. Il ne voit pas la phrase autour. Sur une page de prose, un mot mal lu est souvent déterminable par ses voisins — et ces voisins sont déjà en mémoire, déjà confiants, déjà triés en ordre de lecture. Réutilise l'appel LLM existant : pas de seconde passe, pas de nouvelle configuration. À ne pas confondre avec le contexte mot↔forme du § 07, qui est spatial et désactivé pour une raison mesurée.</p>
+    </li>
+    <li>
+      <h4>Une file de relecture dans le sidecar, et des isolats autour des nombres</h4>
+      <p>Deux petites livraisons qui vont ensemble. D'une part, trier les éléments douteux par confiance croissante et les exposer comme une file : l'appelant construit une navigation « erreur suivante » sans refaire le tri. D'autre part, entourer les suites de chiffres latins d'isolats directionnels dans le <code>.docx</code> — le paragraphe porte <code>&lt;w:bidi/&gt;</code> mais les nombres reposent entièrement sur la bidirectionnalité implicite de Word. Assurance bon marché sur les chiffres qu'on vient de se battre pour récupérer.</p>
+    </li>
+    <li>
+      <h4>Les reprises déjà identifiées</h4>
+      <p>Une clé LLM payante — le palier gratuit domine aujourd'hui la fiabilité de la correction, et aucune ingénierie ne compense un quota journalier. Le fichier de test arabe + anglais qui manque, seul cas capable de trancher le routage par écriture. Et le branchement de <code>get_few_shot_examples()</code>, dont la moitié amont est déjà écrite et stocke déjà.</p>
+    </li>
+    <li>
+      <h4>Si un GPU apparaît : un reconnaisseur arabe par recadrage</h4>
+      <p>Un modèle arabe spécialisé de classe 2 B se glisse <em>derrière</em> la détection PaddleOCR sans rien déplacer : les boîtes, les confiances, le reconstructeur de mise en page, la porte de correction et les surlignages restent tels quels. C'est la seule voie connue au-delà du plafond des modèles mobile. À ne pas confondre avec un remplacement du pipeline par un VLM, écarté au § 10 pour une raison qui n'a pas changé. À n'entreprendre qu'<em>après</em> le banc de mesure, sans quoi le gain n'est pas démontrable.</p>
+    </li>
+  </ol>
+</section>
+
+<!-- ======================= 14 ANNEXES ======================= -->
+<section class="sec" id="s14">
+  <span class="eyebrow">§ 14 — Annexes</span>
+  <h2>Arborescence, réglages, et par où commencer</h2>
+
+  <h3>A · Structure du dépôt</h3>
+  <pre>app/
+  main.py                  points d'entrée, validation, durcissement
+  config.py                pydantic-settings — tous les réglables ici
+pipeline/
+  __init__.py              process_image() — orchestre les 7 étages
+  preprocessor.py          réduction, redressement, débruitage, contraste
+  ocr.py                   1 détection + reconnaissance par recadrage
+  shape_detector.py        contours + EdgeDrawing + encre résiduelle
+  layout_reconstructor.py  ordre de lecture, coord. relatives, mot↔forme
+  llm_corrector.py         correction, nommage, budgets, replis
+  word_assembler.py        génération .docx via DrawingML
+  sidecar.py               sortie JSON
+models/elements.py         Text · SimpleShape · PolylineShape · ComplexShape
+db/                        pool asyncpg, table correction_events
+utils/                     détection d'arabe, ndarray ↔ PNG
+tests/                     157 tests
+md_files/                  README, research.md, rapport de projet</pre>
+
+  <h3>B · Les réglables, et le seul qu'on touche vraiment</h3>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Réglage</th><th class="n">Défaut</th><th>Effet</th></tr></thead>
+      <tbody>
+        <tr><td><code>CONFIDENCE_THRESHOLD</code></td><td class="n">0.75</td><td><strong>Le seul à ajuster couramment.</strong> Le monter envoie plus de mots au LLM : plus lent, et sur un modèle gratuit, limité en débit</td></tr>
+        <tr><td><code>OPENROUTER_MODEL</code></td><td class="n">—</td><td>Doit être un modèle <strong>capable de vision</strong>. Un modèle texte seul renvoie 404 sur chaque appel. Les modèles gratuits tournent : à revérifier</td></tr>
+        <tr><td><code>OPENROUTER_FALLBACK_MODELS</code></td><td class="n">2 modèles</td><td>Liste CSV, essayée dans l'ordre. Gardée en <code>str</code> délibérément : un <code>list[str]</code> ferait tenter à pydantic-settings un parsing JSON de la variable</td></tr>
+        <tr><td><code>SHAPE_CONTEXT_ENABLED</code></td><td class="n">false</td><td>N'activer qu'après une montée de modèle. Voir § 07</td></tr>
+        <tr><td><code>LABEL_SHAPES</code></td><td class="n">true</td><td>Nommage des formes complexes par le modèle</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>C · Par où commencer, dans l'ordre</h3>
+  <pre><span class="cm"># 1. démarrer — tourne sans clé, la correction se signale non configurée</span>
+cp .env.example .env
+docker compose up -d --build
+docker compose ps            <span class="cm"># attendre (healthy)</span>
+
+<span class="cm"># 2. le chemin le plus court vers un résultat visible</span>
+python try_it.py docs/images/floor-plan-input.png
+<span class="cm"># écrit floor-plan-input.docx + .sidecar.json à côté de l'image,</span>
+<span class="cm"># et imprime chaque élément trouvé avec sa confiance</span>
+
+<span class="cm"># 3. voir le relecteur LLM travailler pour de vrai</span>
+<span class="cm"># au seuil 0.75 une image propre ne signale presque rien</span>
+python try_it.py mon_image.png --label
+docker compose logs -f ocr-api   <span class="cm"># la chaîne de replis, en direct</span></pre>
+
+  <h3>D · Lectures liées</h3>
+  <ul>
+    <li><code>md_files/PROJECT_REPORT.md</code> — la conception étage par étage, et chaque mesure derrière chaque constante</li>
+    <li><code>md_files/research.md</code> — l'état de l'art d'où l'architecture a été tirée</li>
+    <li><code>docs/superpowers/specs/</code> — la spécification de conception d'origine</li>
+    <li><code>etude-ocr-arabe-reconstruction-examens.html</code> — l'étude de faisabilité voisine, sur la variante application mobile du même problème</li>
+  </ul>
+</section>
+
+</main>
+</div>
+
+<footer>
+  <div class="foot-in">
+    <div style="font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:var(--repere);margin-bottom:.9rem">Provenance des chiffres</div>
+    <ul class="srcs" style="list-style:none;padding:0;margin-top:0">
+      <li>Latences, confiances et comptages d'éléments — exécutions du conteneur en marche, CPU seul, sur <code>floor-plan-input.png</code>, <code>class-diagram.png</code>, <code>sample_drawing.png</code>, <code>test1.jpeg</code>, <code>test2.jpeg</code></li>
+      <li>Comparatif modèle arabe / modèle anglais — même page, deux valeurs de <code>language_hint</code></li>
+      <li>Défaut de suppression des chiffres — reproduit sur <code>test1.jpeg</code> à travers 45 variantes de prétraitement et 23 configurations de détection, puis corrigé par greffe du donneur v3 (<code>pipeline/ocr.py</code>)</li>
+      <li>Confirmation du plafond de résolution — même page soumise à un modèle document de 3,3 Md de paramètres, erreurs de point identiques</li>
+      <li>Inventaire des modèles arabes de PaddleOCR — obtenu en listant les configurations paddlex, pas depuis la documentation</li>
+      <li>Effet du contexte ajouté sur les petits modèles — Kanerva et al., 2025</li>
+      <li>Écart de localisation détection classique / VLM et CER arabe comparés — KITAB-Bench (MBZUAI Oryx, ACL 2025), arXiv 2502.14949</li>
+    </ul>
+    <p style="margin-top:1.6rem;max-width:70ch;line-height:1.6">Rapport établi le 5 août 2026 à partir du dépôt en l'état. Chaque chiffre provient d'une exécution ; là où une mesure ne porte que sur une ou deux images, c'est dit dans le texte. Les mesures de tiers — modèles disponibles, tarifs, versions — ont une demi-vie courte et sont à revérifier avant tout engagement.</p>
+  </div>
+</footer>
+
+</body>
+</html>

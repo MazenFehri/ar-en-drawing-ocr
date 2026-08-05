@@ -235,12 +235,29 @@ Response:
       "llm_corrections": 5,
       "processing_time_ms": 1200,
       "quality_score": 0.87,
+      "review_queue": ["text_014", "text_003", "text_021"],
       "llm_status": { "state": "success", "reason": null, "model": "google/gemma-4-26b-a4b-it:free" },
       "shape_label_status": { "state": "failed", "reason": "rate_limited", "model": null }
     }
   }
 }
 ```
+
+**The LLM can never rewrite a number.** A correction whose digit runs differ from what OCR read
+is refused outright and the line ships flagged for review instead. Measured against a live
+model on an Arabic worksheet, it returned `45` → `43` at certainty **1.00**, and separately
+dropped a `27250` that the two-recogniser splice had just recovered — so certainty cannot be
+what gates this. Corrections that change only letters are applied normally. Likewise a
+correction at certainty `0.0` is treated as the model declining to read the crop, not as an
+answer, whatever string it returned.
+
+**`review_queue` is the list to work through**, most urgent first — element ids whose text
+nothing has verified. Numeric disagreements lead it (a line where two recognisers disagreed
+about a number can still carry a *high* confidence, so ordering by confidence alone buries the
+one error that makes a maths worksheet wrong); edge marking-column cells sink to the back,
+since they are empty printed score boxes that no model can read; everything else is ordered
+least-confident first. Per element, `digit_disagreement` and `margin_column` say which case
+applies, and `digits_recovered` lists numbers the second recogniser put back.
 
 **Always check `llm_status` before trusting `llm_corrections: 0`.** Zero corrections
 means either "the model confirmed every word" (`state: "success"`) or "the model never

@@ -26,3 +26,4 @@ samples/
 
 # Word lock files (appear while a .docx is open)
 ~$*
+.gstack/
