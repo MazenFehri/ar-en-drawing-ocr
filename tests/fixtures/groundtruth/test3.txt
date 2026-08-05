@@ -1,0 +1,11 @@
+D1 D2 D3 D4 Capacity
+S1 19 30 50 10 7
+S2 70 30 40 60 9
+S3 40 8 70 20 18
+Demand 5 8 7 14 34
+Find initial basic feasible solution for given problem by using
+(a) North-West corner method
+(b) Least cost method
+(c) Vogel's approximation method
+(d) obtain an optimal solution by MODI method
+if the object is to minimize the total transportation cost.
