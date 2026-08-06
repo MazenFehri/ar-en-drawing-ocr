@@ -1,7 +1,20 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    openrouter_api_key: str = ""   # Must be set in .env for LLM correction to work
+    # The key, under whichever name the configured provider uses. Any OpenAI-compatible
+    # endpoint works — the client is the OpenAI SDK pointed at llm_base_url below.
+    #
+    # The alias list is load-bearing, not a convenience: pydantic-settings forbids unknown
+    # fields, so an .env carrying NVIDIA_API_KEY and no OPENROUTER_API_KEY did not merely
+    # disable correction, it raised at `Settings()` construction and took the whole service
+    # down at import. `extra="ignore"` below closes that failure class for good.
+    openrouter_api_key: str = Field("", validation_alias=AliasChoices(
+        "OPENROUTER_API_KEY", "NVIDIA_API_KEY", "LLM_API_KEY",
+    ))
+    # OpenAI-compatible base URL. OpenRouter by default; NVIDIA's hosted models are
+    # https://integrate.api.nvidia.com/v1 and behave the same way through the SDK.
+    llm_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "google/gemma-4-26b-a4b-it:free"
     # Comma-separated fallback model IDs (env: OPENROUTER_FALLBACK_MODELS), tried in
     # order when the primary is rate-limited, retired, or rejected. Kept as a plain
@@ -34,7 +47,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://ocr:ocr@localhost:5432/ocr_db"
     log_level: str = "INFO"
 
-    model_config = SettingsConfigDict(env_file=".env")
+    # extra="ignore": an unrecognised key in .env must not be able to stop the service
+    # starting. It could, and did — see the alias comment above. The cost is that a typo'd
+    # setting name is silently inert instead of loud, which is the better trade for a
+    # component another system calls over HTTP.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property
     def openrouter_fallback_model_list(self) -> list[str]:

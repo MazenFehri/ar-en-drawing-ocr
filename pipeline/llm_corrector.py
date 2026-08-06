@@ -1161,7 +1161,7 @@ def _get_client():
         from openai import OpenAI
         from app.config import settings
         _client_instance = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
+            base_url=settings.llm_base_url,
             api_key=settings.openrouter_api_key,
             timeout=REQUEST_TIMEOUT_SECONDS,
             max_retries=0,  # we do our own bounded retry/backoff above
