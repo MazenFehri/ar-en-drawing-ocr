@@ -236,10 +236,10 @@ footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem
     <h1>Une image de plan devient un document Word éditable, sans quitter la machine</h1>
     <p class="dek">Tout le projet de bout en bout : le contrat d'interface, les sept étages du pipeline, la raison mesurée derrière chaque constante de réglage, les options fermées et pourquoi, les défauts encore ouverts, et ce qu'il reste à faire. Chaque chiffre cité vient d'une exécution réelle, pas d'une fiche produit.</p>
     <div class="meta-strip">
-      <span>État : <b>en service, 157 tests</b></span>
+      <span>État : <b>en service, 269 tests</b></span>
       <span>Coût par page : <b>0 € — OCR local, CPU</b></span>
       <span>Page typique : <b>82 éléments en 5,6 s</b></span>
-      <span>Exactitude mesurée : <b>CER 0,000 (EN) · 0,166 (AR 45 DPI)</b></span>
+      <span>CER mesuré : <b>0,000 (EN nette) · 0,145 (AR 45 DPI)</b></span>
     </div>
   </div>
 </header>
@@ -360,6 +360,8 @@ footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem
         <tr><td>Confiance moyenne, page anglaise</td><td class="n">0,936 / 0,991</td><td>Modèle arabe vs modèle anglais dédié — voir § 09</td></tr>
         <tr><td>Rectangles retrouvés sur un diagramme de classes</td><td class="n">0 → 11 / 11</td><td>Avant / après la passe segments. Voir § 05</td></tr>
         <tr><td>Hauteur de ligne sous laquelle rien n'est récupérable</td><td class="n">20 px</td><td>Signalé par <code>low_resolution</code>. Voir § 11 — c'est la limite dominante</td></tr>
+        <tr><td>Taux d'erreur caractère, page anglaise nette</td><td class="n">0,000</td><td>Zéro erreur, 27 nombres sur 27. Voir § 09</td></tr>
+        <tr><td>Taux d'erreur caractère, fiche arabe à 45 DPI</td><td class="n">0,145</td><td>Majorant, pas une mesure — voir § 09</td></tr>
       </tbody>
     </table>
   </div>
@@ -395,6 +397,18 @@ footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem
       </tbody>
     </table>
   </div>
+
+  <div class="box key">
+    <span class="bt">La liste à traiter : <code>stats.review_queue</code></span>
+    <p>Les identifiants des éléments qu'il faut relire, <strong>du plus urgent au moins urgent</strong>. L'appelant obtient une navigation « erreur suivante » sans refaire le tri. L'ordre n'est pas la confiance croissante seule, et c'est délibéré :</p>
+    <ol style="margin-bottom:0">
+      <li><strong>Les divergences numériques d'abord.</strong> Une ligne où les deux reconnaisseurs ne se sont pas accordés sur un nombre peut porter une confiance <em>élevée</em> — trier par confiance l'enterrerait, alors que c'est la seule erreur qui rend un exercice de mathématiques faux.</li>
+      <li><strong>Les cases de la colonne de notation en dernier.</strong> Ce sont des cases vides à remplir par un enseignant, illisibles par construction : sur <code>test1</code> elles représentent 8 des 13 éléments signalés, et en ordre de confiance pur elles occuperaient tout le début de la file.</li>
+      <li>Le reste, du moins confiant au plus confiant.</li>
+    </ol>
+  </div>
+
+  <p>Par élément, trois champs disent de quel cas il s'agit : <code>digit_disagreement</code> (les deux lecteurs ont divergé sur un nombre), <code>margin_column</code> (case de notation), et <code>digits_recovered</code> (les nombres que le second reconnaisseur a remis en place).</p>
 
   <div class="box warn">
     <span class="bt">La règle de lecture qui évite un contresens</span>
@@ -578,6 +592,44 @@ footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem
     <p>Deux parades, en ceinture et bretelles. Côté invite : le glossaire est désormais conditionné à l'écriture détectée du lot. Côté réponse : un garde-fou rejette une correction qui introduit une écriture absente du lot — délibérément <strong>asymétrique</strong>, il ne bloque que l'arabe surgissant dans un lot classé entièrement anglais, jamais l'inverse, parce qu'un chiffre latin dans une phrase arabe est légitime et courant.</p>
   </div>
 
+  <h3>Deux garde-fous ajoutés après confrontation à un modèle réel</h3>
+  <p>Tant que le palier gratuit était limité en débit, cet étage n'avait jamais été mesuré. Une clé fonctionnelle a montré trois défaillances, toutes à certitude élevée, aucune hypothétique :</p>
+
+  <pre>'45'  →  '43'                                                   certitude 1,00
+'أمتل قود مجدي'  →  '&lt;unknown&gt;'                                  certitude 0,00
+'فاحضرمجدي 27250 مي واحضرت رانية مبلغا يقل عن مبلغ'                certitude 0,85
+  →  'فإذا أهدى مجدي بأقل ما يمكن من القطع التقديرية والأوراق المالية'</pre>
+
+  <div class="box key">
+    <span class="bt">Le modèle ne peut plus réécrire un nombre</span>
+    <p>Une correction dont les suites de chiffres diffèrent de ce que l'OCR a lu est <strong>refusée en bloc</strong>, dans les trois directions : chiffre modifié, supprimé, ou inventé. La certitude ne peut pas servir de garde — le modèle est parfaitement confiant au moment où il le fait.</p>
+    <p>Le refus porte sur la correction <em>entière</em> plutôt que sur une restitution des seuls chiffres : une lecture qui s'est trompée sur le nombre a démontré qu'elle ne lisait pas ce recadrage attentivement, et ses lettres ne valent alors pas mieux que celles de l'OCR. Même philosophie que le garde-fou d'écriture : refuser la classe de changement qui a un tort observé et aucun bénéfice observé. Une vraie erreur de chiffre à l'OCR reste traitée par la greffe à deux reconnaisseurs du § 04, qui est mesurée et qui, elle, fonctionne.</p>
+  </div>
+
+  <p><strong>Une certitude de 0,0 n'est plus une correction.</strong> L'invite demande une chaîne vide quand un recadrage est illisible ; ce modèle renvoie un marqueur — <code>&lt;unknown&gt;</code> — qui est non vide, franchissait donc le test d'existence, et écrasait du vrai texte OCR par le mot « unknown ». C'est la certitude qui fait foi, pas la forme de la chaîne.</p>
+
+  <h3>Contexte de phrase <span class="pill p-hard">mesuré, rejeté</span></h3>
+  <p>L'idée : donner à une ligne douteuse les lignes confiantes qui l'entourent dans l'ordre de lecture. Sur une page de prose, un mot mal lu est souvent déterminable par sa phrase — et ces voisins sont déjà en mémoire, déjà triés. Construit, puis mesuré : 4 exécutions par bras sur <code>test1</code>, la seule page ayant des mots signalés.</p>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Bras</th><th class="n">CER par exécution</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>Contexte <strong>désactivé</strong></td><td class="n">0,145 · 0,145 · 0,145 · 0,145</td><td>ne dégrade jamais</td></tr>
+        <tr><td>Contexte <strong>activé</strong></td><td class="n">0,145 · 0,145 · 0,145 · <strong>0,176</strong></td><td>dégrade encore</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Référence OCR seul : 0,145. Le contexte n'a jamais aidé et a parfois nui — <code>SENTENCE_CONTEXT_ENABLED</code> reste à <code>false</code>, désormais pour une raison mesurée et non héritée.</p>
+
+  <p>L'échec est exactement celui que l'avertissement de l'invite était censé empêcher : le modèle a fondu les lignes voisines dans sa réponse, et lors d'une autre exécution a inséré le mot anglais <em>« prostaglandin »</em> dans une fiche de mathématiques arabe, à certitude 0,92. L'instruction de ne pas recopier le contexte est une demande, pas une garantie — même leçon que la cicatrice ci-dessus.</p>
+
+  <div class="box warn">
+    <span class="bt">Le constat qui compte pour la suite</span>
+    <p>Sur 14 exécutions, avec et sans contexte, avec et sans garde-fous, <strong>la correction n'a jamais amélioré le CER de cette page une seule fois</strong>. Le meilleur résultat est « inchangé par rapport à l'OCR seul ». Avant les garde-fous, il était fréquemment <em>pire</em>.</p>
+    <p>Conséquence directe pour la feuille de route : la valeur de cet étage repose sur un <strong>meilleur modèle</strong>, pas sur du travail d'invite. Et c'est désormais bon marché à trancher — <code>tools/eval.py --llm</code> répond en quatre exécutions pour n'importe quel candidat.</p>
+  </div>
+
   <h3>Contexte mot ↔ forme <span class="pill p-off">livré, désactivé</span></h3>
   <p>L'idée : donner au mot douteux le texte confiant de ses voisins dans la même boîte. Mesuré sur le document de test, <strong>1 mot signalé sur 4 seulement</strong> avait un voisin confiant dans sa boîte — les autres sont des étiquettes de cardinalité qui, par construction, vivent en dehors de toute boîte. Pire : l'activer faisait rendre <em>aucune correction du tout</em> au modèle 12B configuré, sur 2 exécutions sur 3. Cela recoupe des travaux publiés : le contexte ajouté aide les modèles 27B/70B et fait <em>perdre</em> du contenu aux plus petits. Conservé pour un modèle plus gros, <code>SHAPE_CONTEXT_ENABLED=false</code> en attendant.</p>
 
@@ -629,6 +681,31 @@ footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem
 <section class="sec" id="s9">
   <span class="eyebrow">§ 09 — Mesures</span>
   <h2>Tout vient du conteneur en marche, CPU seul</h2>
+
+  <h3>Exactitude — la mesure qui manquait</h3>
+  <p>Pendant longtemps, tout chiffre de qualité cité par ce projet était un <strong>score de confiance</strong> : l'avis du modèle sur lui-même. Pas de CER, pas de WER, aucun garde-fou contre la régression — et chaque constante de réglage avait été arbitrée une fois, à la main, sur deux images. <code>tools/eval.py</code> mesure la justesse contre des pages transcrites.</p>
+
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Page</th><th class="n">CER</th><th class="n">WER</th><th class="n">nombres</th><th>Confiance dans le chiffre</th></tr></thead>
+      <tbody>
+        <tr><td><code>test3</code> — anglais, haute résolution</td><td class="n"><strong>0,000</strong></td><td class="n"><strong>0,000</strong></td><td class="n">27/27</td><td>mesure réelle</td></tr>
+        <tr><td><code>test1</code> — fiche arabe, ~45 DPI</td><td class="n">0,145</td><td class="n">0,396</td><td class="n">7/11</td><td><span class="pill p-mid">majorant</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong><code>test3</code> est un sans-faute</strong> : zéro erreur de caractère, zéro erreur de mot, les 27 nombres retrouvés y compris la grille 5×5 complète. C'est la référence qui compte — <em>le pipeline n'est pas le facteur limitant</em>. Sur une entrée lisible, il lit la page exactement. Tout le reste est une question de qualité d'entrée et de mise en page, pas de reconnaissance.</p>
+
+  <p>Le CER de <code>test1</code> est un <strong>majorant, pas une mesure</strong> : la transcription omet la rangée de jetons et les cases de notation, illisibles à 45 DPI, donc le texte que l'OCR en tire est compté comme insertion. Le biais est constant tant que ce contenu ne bouge pas — et une livraison a précisément prouvé que cette réserve avait un sens, en déplaçant le CER de 0,166 à 0,190 <em>sans changer un seul caractère reconnu</em>.</p>
+
+  <div class="box key">
+    <span class="bt">Pourquoi les nombres sont comptés à part du CER</span>
+    <p>Supprimer les trois nombres que le reconnaisseur arabe est connu pour perdre déplace le CER de <strong>0,028</strong> — indiscernable du bruit — pendant que la colonne « nombres » tombe à <strong>8/11 et les nomme</strong>.</p>
+    <p>Sur une fiche de mathématiques, ces deux erreurs ne sont pas comparables : un caractère faux est une coquille, un chiffre faux rend l'exercice insoluble. Le CER les pèse identiquement. C'est toute la raison d'être de la troisième colonne.</p>
+  </div>
+
+  <p class="cap">Vérifié dans les conditions les plus strictes disponibles : image Docker reconstruite intégralement (<code>--no-cache</code>), poids de modèles re-téléchargés, aucun bytecode Python, aucun cache pytest. Chiffres identiques à toutes les exécutions précédentes. 269 tests au vert.</p>
 
   <h3>Latence</h3>
   <div class="tw">
@@ -700,8 +777,17 @@ footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem
         <tr><td>Remplacer la CV classique pour les formes</td><td class="n"><span class="pill p-ok">résolu autrement</span></td><td>Le bon primitif était un détecteur de segments, pas un autre modèle. Un assembleur LSD non réglé retrouvait déjà 11 rectangles sur 14 en 167 ms CPU</td></tr>
         <tr><td>Segmentation de mise en page PP-Structure</td><td class="n"><span class="pill p-hard">supprimé</span></td><td>Rendait exactement une région, de type « figure », sur les deux images de test : la liste de régions de texte produite était toujours vide. Coût : 5,27 s et 1,15 s, plus un troisième jeu de poids dans l'image, pour rien</td></tr>
         <tr><td>Transcription automatique de l'arabe manuscrit</td><td class="n"><span class="pill p-mid">hors périmètre</span></td><td>Rien de déployable sur CPU en 2026. Ces régions reviennent à faible confiance et surlignées, plutôt que devinées</td></tr>
+        <tr><td>Neutralisation du filigrane par séparation de luminance</td><td class="n"><span class="pill p-hard">testé, rejeté</span></td><td>12 variantes de seuils mesurées. L'hypothèse d'un histogramme trimodal est <strong>fausse à 45 DPI</strong> — voir l'encadré ci-dessous</td></tr>
+        <tr><td>Isolats directionnels autour des chiffres latins</td><td class="n"><span class="pill p-hard">écarté</span></td><td>Les chiffres se résolvent déjà correctement sous UAX#9 dans une exécution RTL. Aucun défaut observé, donc aucune correction à appliquer — voir § 08</td></tr>
       </tbody>
     </table>
+  </div>
+
+  <div class="box warn">
+    <span class="bt">Le filigrane : une hypothèse de la littérature, démentie par la mesure</span>
+    <p>L'approche classique postule un histogramme <em>trimodal et bien séparé</em> — encre 0–70, filigrane 170–230, papier 240–255 — qu'un simple seuillage suffirait donc à trancher. Mesuré sur <code>test1</code> : 3,08 % d'encre, 3,41 % en 71–120, 4,53 % en 121–170, 6,60 % dans la bande dite « filigrane », 6,91 % en 231–244. <strong>Il n'y a aucune vallée entre l'encre et le filigrane à 45 DPI</strong> : l'anticrénelage étale chaque bord de glyphe en travers de la bande supposée ne contenir que la surcouche.</p>
+    <p>La même mesure sur <code>test3</code>, en haute résolution, montre bien la séparation attendue. L'hypothèse tient donc à 300 DPI et tombe à 45 — et 45 est précisément où vivent les pages filigranées. Les réglages agressifs détruisent les nombres que la greffe du § 04 récupère : les seuils de la littérature donnent CER 0,396 contre 0,145 de référence, et <strong>3 nombres sur 11</strong>.</p>
+    <p>Une bande très conservatrice bat pourtant la référence (0,119). Rejetée quand même : elle échange de la précision sur les points diacritiques — la contrainte dominante de ce projet — contre le retrait du filigrane, et sa réponse au seuil est non monotone, ce qui trahit un ajustement au bruit d'une seule page. À rouvrir quand <code>test2</code> aura une transcription.</p>
   </div>
 
   <div class="box">
@@ -716,10 +802,11 @@ footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem
   <h2>Ce qui ne marche pas, dit sans adoucissement</h2>
 
   <div class="box key">
-    <span class="bt">Le défaut le plus destructeur — corrigé, mais non vérifié</span>
+    <span class="bt">Le défaut le plus destructeur — corrigé, et désormais vérifié</span>
     <p><strong><code>arabic_PP-OCRv5_mobile_rec</code> supprime silencieusement les chiffres latins insérés au milieu d'une ligne arabe</strong>, en laissant une double espace là où le nombre se trouvait. Sur la fiche de mathématiques de test : <code>27250</code>, <code>8500</code> et <code>3240</code> tous perdus ; <code>43500</code> ne survivait que parce qu'il constitue son propre recadrage. Les chiffres sont <em>à l'intérieur</em> du polygone détecté et l'arabe environnant se lit correctement : défaut de décodeur, immunisé à 45 variantes de prétraitement et 23 configurations de détection.</p>
     <p><strong>Corrigé</strong> par <code>_recover_dropped_digits</code> / <code>_splice_digits</code> (<code>pipeline/ocr.py</code>). <code>arabic_PP-OCRv3_mobile_rec</code> — la génération précédente — <em>émet</em> ces chiffres tout en étant plus faible sur l'arabe (0,8924 contre 0,9145). Il sert donc de <strong>donneur de chiffres</strong> et rien d'autre : seuls les recadrages dont la lecture retenue est arabe sont relus, l'alignement <code>difflib</code> greffe les suites de chiffres absentes, et aucun texte arabe du donneur n'est jamais conservé. Une page sans arabe ne paie rien.</p>
-    <p><strong>Ce qui reste ouvert, c'est la vérification.</strong> La greffe est au mieux-effort : elle abandonne sous 0,5 de similarité, et n'insère que les suites absentes du texte principal. Rien dans le sidecar ne dit « ici les deux lecteurs ont divergé sur un nombre ». L'appelant .NET ne peut donc pas forcer une relecture humaine sur exactement les lignes qui le méritent. C'est l'objet de la première étape du § 13.</p>
+    <p><strong>Vérifié depuis.</strong> Le banc du § 09 confirme les trois nombres présents sur <code>test1</code>, et une régression de la greffe apparaîtrait maintenant comme un chiffre dans la colonne « nombres ». La greffe reste au mieux-effort — elle abandonne sous 0,5 de similarité — mais elle ne se tait plus : <code>digits_recovered</code> liste ce qu'elle a remis en place et <code>digit_disagreement</code> signale un nombre vu par le donneur et impossible à placer. Cette seconde alerte force le surlignage <em>indépendamment de la confiance</em>, parce que le score arabe reste bon sur une ligne dont un nombre a été supprimé.</p>
+    <p class="cap" style="margin:.6rem 0 0">Limite honnête de ce signal : il détecte « le donneur a vu un nombre que nous n'avons pas pu placer », pas « les deux lecteurs l'ont manqué ». Sur <code>test1</code> il ne se déclenche jamais, ce qui est correct — il n'y a pas de désaccord, il y a une cécité partagée.</p>
     <p class="cap" style="margin:.6rem 0 0">Nuance pour qui rédige le contrôle qualité : le mode de défaillance est une <strong>suppression</strong>, pas l'inversion bidirectionnelle qu'on anticipe habituellement. Un contrôle qui compare des nombres entre deux moteurs ne voit rien — il n'y a pas de nombre à comparer. Il doit porter sur la <em>divergence</em>, pas seulement sur les valeurs.</p>
   </div>
 
@@ -734,7 +821,10 @@ footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem
     <table class="d">
       <thead><tr><th>Écart</th><th class="n">État</th><th>Effet réel</th></tr></thead>
       <tbody>
-        <tr><td>Qualité de correction plafonnée par l'offre LLM gratuite</td><td class="n"><span class="pill p-mid">contourné</span></td><td>Les quotas sont journaliers et les modèles gratuits rendent une certitude élevée sur des réponses fausses. Les mots douteux restent surlignés dans tous les cas. Une clé payante est la correction</td></tr>
+        <tr><td><strong>La correction LLM n'apporte rien de mesurable</strong></td><td class="n"><span class="pill p-hard">ouvert</span></td><td>Jamais amélioré le CER sur 14 exécutions. Neutre au mieux depuis les garde-fous du § 07. La valeur dépend d'un modèle supérieur, pas de l'invite</td></tr>
+        <tr><td>Les marqueurs de liste (<code>1/ 2/ 4/</code>) restent perdus</td><td class="n"><span class="pill p-hard">non corrigeable</span></td><td>Tracé par recadrage : le donneur v3 en est aveugle lui aussi — il émet la barre oblique, jamais le chiffre. Le mécanisme ne peut récupérer que ce qu'un des deux lecteurs voit. Déduire la valeur de la position serait inventer un nombre</td></tr>
+        <tr><td>Un seul page de vérité terrain arabe</td><td class="n"><span class="pill p-mid">à étendre</span></td><td><code>test3</code> n'a aucun mot signalé, donc toute mesure de la correction repose sur <code>test1</code> seul. <code>test2</code> est la page suivante évidente, et rouvrirait aussi le dossier filigrane</td></tr>
+        <tr><td>Fiabilité du fournisseur LLM</td><td class="n"><span class="pill p-mid">variable</span></td><td>Palier gratuit : environ une exécution sur deux limitée en débit. Point de terminaison payant : plus stable, mais un <code>server_error</code> observé, et plusieurs modèles annoncés multimodaux inutilisables — voir § 12</td></tr>
         <tr><td>Boucle de retour d'expérience</td><td class="n"><span class="pill p-mid">à moitié</span></td><td>Les corrections sont bien stockées ; <code>get_few_shot_examples()</code> existe mais n'est jamais appelé</td></tr>
         <tr><td>Validation de <code>/feedback</code></td><td class="n"><span class="pill p-mid">lâche</span></td><td>Accepte n'importe quel <code>document_id</code> — pas de contrôle de clé étrangère</td></tr>
         <tr><td>Contexte mot ↔ forme</td><td class="n"><span class="pill p-off">désactivé</span></td><td>Nécessite un modèle au-dessus du palier 8–13 B. Voir § 07</td></tr>
@@ -762,8 +852,27 @@ footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem
         <tr><td>500 générique + journalisation côté serveur</td><td>Fuite de traces d'exécution vers l'appelant</td></tr>
         <tr><td>Panne de base tolérée au démarrage</td><td>Postgres n'est nécessaire qu'à <code>/feedback</code>, jamais à l'OCR</td></tr>
         <tr><td>Niveau de journalisation réaffirmé après chaque exécution</td><td>L'import de PaddleOCR met silencieusement le logger racine à WARNING, ce qui tuait toute la journalisation après la première requête</td></tr>
+        <tr><td>Clé inconnue dans <code>.env</code> tolérée (<code>extra="ignore"</code>)</td><td>Une clé non reconnue faisait <strong>échouer le service à l'import</strong>, pas seulement perdre la fonction concernée — voir l'encadré ci-dessous</td></tr>
       </tbody>
     </table>
+  </div>
+
+  <div class="box warn">
+    <span class="bt">Changer de fournisseur LLM : deux pièges, l'un fatal</span>
+    <p><strong>Le premier a mis le service à terre.</strong> Remplacer <code>OPENROUTER_API_KEY</code> par <code>NVIDIA_API_KEY</code> dans le <code>.env</code> ne désactivait pas seulement la correction : pydantic-settings interdit les champs inconnus, donc <code>Settings()</code> levait une exception et le service échouait <em>à l'import</em>. Chaque appel à <code>/process</code> aurait renvoyé 500. La clé se résout désormais depuis l'un ou l'autre nom, et <code>extra="ignore"</code> ferme cette classe de panne : une clé non reconnue dans un fichier d'environnement ne doit jamais pouvoir empêcher un service de démarrer.</p>
+    <p><strong>Le second : « multimodal » dans un nom de modèle ne prédit rien.</strong> Vérifié contre un point de terminaison réel, avec une charge utile de deux recadrages :</p>
+    <div class="tw" style="margin-top:.8rem">
+      <table class="d">
+        <thead><tr><th>Modèle</th><th>Résultat</th></tr></thead>
+        <tbody>
+          <tr><td><code>llama-3.1-nemotron-nano-vl-8b-v1</code></td><td><span class="pill p-ok">fonctionne</span> ~8,6 s pour 2 recadrages, JSON valide</td></tr>
+          <tr><td><code>nemotron-3-nano-omni-30b-a3b-reasoning</code></td><td>répond au texte en 0,5 s, <strong>ne répond jamais</strong> aux images (180 s sans retour)</td></tr>
+          <tr><td><code>llama-3.2-11b-vision-instruct</code></td><td>400 — <em>« At most 1 image(s) may be provided in one prompt »</em></td></tr>
+          <tr><td><code>llama-3.2-90b-vision-instruct</code></td><td>aucune réponse en 75 s</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Ce plafond d'une image par requête est <strong>rédhibitoire ici</strong> : ce pipeline groupe plusieurs recadrages par appel, c'est tout son argument de coût. À tester avant de configurer — l'échec se présente comme un banal <code>timed_out</code>, sans rien de plus explicite. La liste des modèles de repli doit être vidée hors OpenRouter : ces identifiants n'existent pas ailleurs, et chaque appel brûlerait ses tentatives sur des 404 garantis.</p>
   </div>
 
   <div class="box warn">
@@ -777,36 +886,51 @@ footer{border-top:1px solid var(--encre);background:var(--blanc);margin-top:2rem
 <!-- ======================= 13 ROADMAP ======================= -->
 <section class="sec" id="s13">
   <span class="eyebrow">§ 13 — Feuille de route</span>
-  <h2>Par valeur décroissante, pas par ordre d'apparition</h2>
+  <h2>Ce qui est fait, ce qui est clos, et le seul levier qui reste</h2>
+
+  <h4>Livré et vérifié</h4>
+  <div class="tw">
+    <table class="d">
+      <thead><tr><th>Chantier</th><th>Résultat</th></tr></thead>
+      <tbody>
+        <tr><td>Banc de mesure avec vérité terrain</td><td>CER / WER / exactitude numérique, <code>tools/eval.py</code>. Voir § 09</td></tr>
+        <tr><td>Divergence numérique publiée</td><td><code>digits_recovered</code>, <code>digit_disagreement</code>, surlignage indépendant de la confiance</td></tr>
+        <tr><td>Colonne de notation isolée</td><td>Quatre conditions simultanées. La quatrième — être <em>hors du bloc de texte</em> — n'a été trouvée qu'en exécutant sur les vraies pages : sans elle la règle avalait les libellés de ligne d'un tableau et 19 attributs UML, et <strong>tous les tests synthétiques passaient</strong></td></tr>
+        <tr><td>File de relecture</td><td><code>stats.review_queue</code>, ordonnée par urgence réelle. Voir § 01</td></tr>
+        <tr><td>Garde-fous numériques sur le LLM</td><td>Le modèle ne peut plus réécrire, supprimer ni inventer un nombre. Voir § 07</td></tr>
+        <tr><td>Point de terminaison LLM configurable</td><td>Tout fournisseur compatible OpenAI. Et une clé <code>.env</code> inconnue ne fait plus tomber le service. Voir § 12</td></tr>
+        <tr><td>Exécutions arabes non envoyées au modèle</td><td>Les cases de notation sont marquées, jamais envoyées : 13 éléments signalés deviennent 5 réellement transmis</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h4>Clos, avec les mesures à l'appui</h4>
+  <p>Trois portes fermées pour éviter qu'on les rouvre : le <strong>contexte de phrase</strong> (mesuré, dégrade, § 07), la <strong>neutralisation du filigrane</strong> (12 variantes, hypothèse démentie, § 10), et les <strong>marqueurs de liste perdus</strong> (le donneur en est aveugle aussi, § 11). Un résultat négatif documenté est un résultat : il évite de repayer l'expérience.</p>
 
   <ol class="steps">
     <li>
-      <h4>Un banc de mesure avec vérité terrain <span class="pill p-hard">préalable à tout</span></h4>
-      <p>Le projet n'a aujourd'hui <strong>aucune mesure d'exactitude</strong> : uniquement des scores de confiance, qui sont l'avis du modèle sur lui-même. Chaque réglage cité dans ce rapport a été arbitré à la main, une fois, sur deux images. Sans banc, aucune des étapes suivantes n'est jugeable — et une régression est invisible. CER, WER, et le taux d'exactitude numérique, sur une dizaine de pages transcrites. C'est le meilleur investissement du projet, et il est indépendant de tout le reste.</p>
+      <h4>Un meilleur modèle de vision <span class="pill p-hard">le seul vrai levier</span></h4>
+      <p>Sur 14 exécutions, la correction n'a <strong>jamais</strong> amélioré le CER. Ce n'est pas un problème d'invite — le contexte a été essayé et mesuré, il dégrade. C'est un plafond de modèle. Le banc du § 09 tranche désormais n'importe quel candidat en quatre exécutions, et le § 12 dit quoi vérifier avant de le configurer.</p>
     </li>
     <li>
-      <h4>Publier la divergence numérique dans le sidecar</h4>
-      <p>La greffe de chiffres (§ 11) corrige mais ne signale pas. Le donneur v3 sait déjà, à chaque ligne arabe, s'il a vu un nombre que v5 avait perdu — cette information est calculée puis jetée. L'exposer par élément permet à l'appelant .NET de forcer une relecture humaine sur exactement les lignes qui la méritent, au lieu de faire confiance en bloc.</p>
+      <h4>Une vérité terrain pour <code>test2</code></h4>
+      <p>La mesure arabe repose sur une seule page : <code>test3</code> n'a aucun mot signalé. <code>test2</code> doublerait la base de preuves <em>et</em> rouvrirait le dossier filigrane, qui a été rejeté pour insuffisance de données autant que pour son mécanisme. Demande quelqu'un qui lit l'arabe — une transcription devinée déplacerait la mesure sans que personne ne le sache.</p>
     </li>
     <li>
-      <h4>Isoler la colonne de notation en marge</h4>
-      <p>L'ordre de lecture groupe les mots en lignes par centre vertical, puis trie chaque ligne. Sur une page d'examen, les petites cases de notation en bordure partagent leur ordonnée avec le corps du texte : elles s'insèrent donc <em>au milieu</em> des phrases. Le périmètre du service a été élargi aux pages scolaires denses, mais le reconstructeur a été conçu pour des plans. Un détecteur de colonne étroite en bordure suffit.</p>
+      <h4>Le fichier de test arabe + anglais qui manque toujours</h4>
+      <p>Le seul cas capable de trancher le routage par écriture, et il n'existe aucune image pour le décider. Peu de travail, débloque une décision d'architecture.</p>
     </li>
     <li>
-      <h4>Injecter le contexte de la phrase dans l'invite de correction</h4>
-      <p>Le relecteur ne reçoit qu'une vignette par mot et son score. Il ne voit pas la phrase autour. Sur une page de prose, un mot mal lu est souvent déterminable par ses voisins — et ces voisins sont déjà en mémoire, déjà confiants, déjà triés en ordre de lecture. Réutilise l'appel LLM existant : pas de seconde passe, pas de nouvelle configuration. À ne pas confondre avec le contexte mot↔forme du § 07, qui est spatial et désactivé pour une raison mesurée.</p>
+      <h4>Brancher <code>get_few_shot_examples()</code></h4>
+      <p>La moitié amont de la boucle de retour est écrite et stocke déjà. Il manque le fil qui va des corrections enregistrées vers l'invite. À évaluer sur le banc comme le reste — au vu du § 07, sans preuve chiffrée, on ajouterait du contexte à un modèle qui y réagit mal.</p>
     </li>
     <li>
-      <h4>Une file de relecture dans le sidecar, et des isolats autour des nombres</h4>
-      <p>Deux petites livraisons qui vont ensemble. D'une part, trier les éléments douteux par confiance croissante et les exposer comme une file : l'appelant construit une navigation « erreur suivante » sans refaire le tri. D'autre part, entourer les suites de chiffres latins d'isolats directionnels dans le <code>.docx</code> — le paragraphe porte <code>&lt;w:bidi/&gt;</code> mais les nombres reposent entièrement sur la bidirectionnalité implicite de Word. Assurance bon marché sur les chiffres qu'on vient de se battre pour récupérer.</p>
-    </li>
-    <li>
-      <h4>Les reprises déjà identifiées</h4>
-      <p>Une clé LLM payante — le palier gratuit domine aujourd'hui la fiabilité de la correction, et aucune ingénierie ne compense un quota journalier. Le fichier de test arabe + anglais qui manque, seul cas capable de trancher le routage par écriture. Et le branchement de <code>get_few_shot_examples()</code>, dont la moitié amont est déjà écrite et stocke déjà.</p>
+      <h4>Tableaux bordés, et arabe manuscrit</h4>
+      <p>Reportés, tous deux sans changement. La grille émergente n'est pas visiblement cassée, et rien de déployable sur CPU ne lit l'arabe manuscrit. Ces régions reviennent surlignées plutôt que devinées, ce qui reste la bonne réponse.</p>
     </li>
     <li>
       <h4>Si un GPU apparaît : un reconnaisseur arabe par recadrage</h4>
-      <p>Un modèle arabe spécialisé de classe 2 B se glisse <em>derrière</em> la détection PaddleOCR sans rien déplacer : les boîtes, les confiances, le reconstructeur de mise en page, la porte de correction et les surlignages restent tels quels. C'est la seule voie connue au-delà du plafond des modèles mobile. À ne pas confondre avec un remplacement du pipeline par un VLM, écarté au § 10 pour une raison qui n'a pas changé. À n'entreprendre qu'<em>après</em> le banc de mesure, sans quoi le gain n'est pas démontrable.</p>
+      <p>Un modèle arabe spécialisé de classe 2 B se glisse <em>derrière</em> la détection PaddleOCR sans rien déplacer : boîtes, confiances, reconstructeur de mise en page, porte de correction et surlignages restent tels quels. C'est la seule voie connue au-delà du plafond des modèles mobile — à ne pas confondre avec un remplacement du pipeline par un VLM, écarté au § 10 pour une raison qui n'a pas changé. Le banc existe maintenant, donc le gain serait démontrable au lieu d'être supposé.</p>
     </li>
   </ol>
 </section>
@@ -832,8 +956,11 @@ pipeline/
 models/elements.py         Text · SimpleShape · PolylineShape · ComplexShape
 db/                        pool asyncpg, table correction_events
 utils/                     détection d'arabe, ndarray ↔ PNG
-tests/                     157 tests
-md_files/                  README, research.md, rapport de projet</pre>
+tools/eval.py              banc CER / WER / exactitude numérique
+tests/fixtures/groundtruth/  pages transcrites + note de confiance par page
+tests/                     269 tests
+outputs/                   .docx + sidecar produits pour chaque échantillon
+md_files/                  README, research.md, plan d'amélioration, base de mesure</pre>
 
   <h3>B · Les réglables, et le seul qu'on touche vraiment</h3>
   <div class="tw">
@@ -843,7 +970,9 @@ md_files/                  README, research.md, rapport de projet</pre>
         <tr><td><code>CONFIDENCE_THRESHOLD</code></td><td class="n">0.75</td><td><strong>Le seul à ajuster couramment.</strong> Le monter envoie plus de mots au LLM : plus lent, et sur un modèle gratuit, limité en débit</td></tr>
         <tr><td><code>OPENROUTER_MODEL</code></td><td class="n">—</td><td>Doit être un modèle <strong>capable de vision</strong>. Un modèle texte seul renvoie 404 sur chaque appel. Les modèles gratuits tournent : à revérifier</td></tr>
         <tr><td><code>OPENROUTER_FALLBACK_MODELS</code></td><td class="n">2 modèles</td><td>Liste CSV, essayée dans l'ordre. Gardée en <code>str</code> délibérément : un <code>list[str]</code> ferait tenter à pydantic-settings un parsing JSON de la variable</td></tr>
+        <tr><td><code>LLM_BASE_URL</code></td><td class="n">openrouter</td><td>Tout point de terminaison compatible OpenAI. La clé se lit aussi sous <code>NVIDIA_API_KEY</code> ou <code>LLM_API_KEY</code>. Vider la liste de repli hors OpenRouter — voir § 12</td></tr>
         <tr><td><code>SHAPE_CONTEXT_ENABLED</code></td><td class="n">false</td><td>N'activer qu'après une montée de modèle. Voir § 07</td></tr>
+        <tr><td><code>SENTENCE_CONTEXT_ENABLED</code></td><td class="n">false</td><td>Mesuré : dégrade sur le palier de modèle actuel. Re-mesurer avant d'activer, jamais activer par principe. Voir § 07</td></tr>
         <tr><td><code>LABEL_SHAPES</code></td><td class="n">true</td><td>Nommage des formes complexes par le modèle</td></tr>
       </tbody>
     </table>
@@ -863,7 +992,14 @@ python try_it.py docs/images/floor-plan-input.png
 <span class="cm"># 3. voir le relecteur LLM travailler pour de vrai</span>
 <span class="cm"># au seuil 0.75 une image propre ne signale presque rien</span>
 python try_it.py mon_image.png --label
-docker compose logs -f ocr-api   <span class="cm"># la chaîne de replis, en direct</span></pre>
+docker compose logs -f ocr-api   <span class="cm"># la chaîne de replis, en direct</span>
+
+<span class="cm"># 4. mesurer, avant de croire quoi que ce soit</span>
+python tools/eval.py --self-test   <span class="cm"># l'arithmétique, sans modèles ni images</span>
+docker run --rm -v "$PWD:/src" -w /src -e PYTHONPATH=/src \
+  ocrtask-ocr-api python tools/eval.py          <span class="cm"># CER / WER / nombres</span>
+<span class="cm"># --llm ajoute l'étage de correction ; --include-margin score aussi les</span>
+<span class="cm"># cases de notation, ce qu'il faut pour comparer à une exécution ancienne</span></pre>
 
   <h3>D · Lectures liées</h3>
   <ul>
@@ -885,11 +1021,14 @@ docker compose logs -f ocr-api   <span class="cm"># la chaîne de replis, en dir
       <li>Comparatif modèle arabe / modèle anglais — même page, deux valeurs de <code>language_hint</code></li>
       <li>Défaut de suppression des chiffres — reproduit sur <code>test1.jpeg</code> à travers 45 variantes de prétraitement et 23 configurations de détection, puis corrigé par greffe du donneur v3 (<code>pipeline/ocr.py</code>)</li>
       <li>Confirmation du plafond de résolution — même page soumise à un modèle document de 3,3 Md de paramètres, erreurs de point identiques</li>
+      <li>CER / WER / exactitude numérique — <code>tools/eval.py</code> contre des pages transcrites à la main, image Docker reconstruite sans cache, poids re-téléchargés, aucun bytecode</li>
+      <li>Comportement du relecteur LLM — 14 exécutions réelles contre deux fournisseurs, corrections journalisées une par une avec leur certitude déclarée</li>
+      <li>Filigrane — 12 variantes de seuils et la distribution des niveaux de gris de deux pages</li>
       <li>Inventaire des modèles arabes de PaddleOCR — obtenu en listant les configurations paddlex, pas depuis la documentation</li>
       <li>Effet du contexte ajouté sur les petits modèles — Kanerva et al., 2025</li>
       <li>Écart de localisation détection classique / VLM et CER arabe comparés — KITAB-Bench (MBZUAI Oryx, ACL 2025), arXiv 2502.14949</li>
     </ul>
-    <p style="margin-top:1.6rem;max-width:70ch;line-height:1.6">Rapport établi le 5 août 2026 à partir du dépôt en l'état. Chaque chiffre provient d'une exécution ; là où une mesure ne porte que sur une ou deux images, c'est dit dans le texte. Les mesures de tiers — modèles disponibles, tarifs, versions — ont une demi-vie courte et sont à revérifier avant tout engagement.</p>
+    <p style="margin-top:1.6rem;max-width:70ch;line-height:1.6">Rapport établi le 5 août 2026, mis à jour le 6 août après la campagne de mesure : banc d'exactitude, garde-fous numériques sur le relecteur, file de relecture, et deux expériences rejetées avec leurs chiffres. Chaque valeur provient d'une exécution ; là où une mesure ne porte que sur une ou deux pages, c'est dit dans le texte plutôt que laissé à deviner. Les mesures de tiers — modèles disponibles, tarifs, versions — ont une demi-vie courte et sont à revérifier avant tout engagement.</p>
   </div>
 </footer>
 
