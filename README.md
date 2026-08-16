@@ -1,4 +1,13 @@
-# Arabic Architectural OCR API
+<div align="center">
+
+<img src="docs/images/banner.svg" alt="Arabic Architectural OCR API" width="100%" />
+
+![Python 3.11](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688?logo=fastapi&logoColor=white)
+![PaddleOCR](https://img.shields.io/badge/OCR-PaddleOCR-5A4FCF)
+![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
+
+</div>
 
 FastAPI microservice that accepts architectural drawing images (Arabic/English, handwritten or printed) and returns a positioned Word `.docx` document plus a JSON sidecar.
 

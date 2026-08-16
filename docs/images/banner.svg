@@ -1,0 +1,13 @@
+<svg width="1200" height="220" viewBox="0 0 1200 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Arabic Architectural OCR API">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f1e4d"/>
+      <stop offset="55%" stop-color="#2d2a7a"/>
+      <stop offset="100%" stop-color="#5b2a86"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="220" rx="14" fill="url(#bg)"/>
+  <text x="600" y="102" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="46" font-weight="700" fill="#ffffff">Arabic Architectural OCR API</text>
+  <text x="600" y="146" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="19" fill="#d7d5f0">Positioned Word docs from architectural drawings</text>
+  <text x="600" y="172" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="19" fill="#d7d5f0">Arabic &amp; English, handwritten or printed</text>
+</svg>
